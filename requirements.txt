@@ -1,2 +1,5 @@
 # LifeSimulationPlugin Dependencies
-# No external dependencies required
+
+# HTTP 客户端 / HTTP Client
+# 用于自定义时间 API 和节日 API 的网络请求
+aiohttp>=3.8.0
