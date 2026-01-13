@@ -1,0 +1,147 @@
+{
+  "manifest_version": 1,
+  "id": "maibot.life_simulation_plugin",
+  "name": "Life Simulation Plugin (AI-Driven)",
+  "name_zh-CN": "事件及人体模拟插件（AI驱动）",
+  "version": "1.1.0",
+  "description": "AI-driven life simulation: schedule, events, habits, holidays, and emotion judgment for human-like behavior",
+  "description_zh-CN": "AI驱动的生活模拟：日程、事件、习惯、节日和情绪判断，实现拟人化行为",
+  "author": {
+    "name": "MaiBot Team",
+    "url": "https://github.com/Mai-with-u/MaiBot"
+  },
+  "license": "MIT",
+  "host_application": {
+    "min_version": "0.12.0",
+    "max_version": ""
+  },
+  "homepage_url": "https://github.com/Mai-with-u/MaiBot",
+  "repository_url": "https://github.com/Mai-with-u/MaiBot",
+  "keywords": [
+    "life",
+    "simulation",
+    "AI-driven",
+    "schedule",
+    "events",
+    "habits",
+    "holidays",
+    "emotion",
+    "拟人",
+    "生活",
+    "模拟",
+    "AI驱动",
+    "日程",
+    "事件",
+    "习惯",
+    "节日",
+    "情绪"
+  ],
+  "categories": [
+    "Simulation",
+    "Social",
+    "Utility"
+  ],
+  "plugin_info": {
+    "is_built_in": false,
+    "plugin_type": "simulation",
+    "components": [
+      {
+        "type": "event_handler",
+        "name": "life_simulation_startup",
+        "description": "Start life simulation scheduler"
+      },
+      {
+        "type": "event_handler",
+        "name": "life_simulation_stop",
+        "description": "Stop life simulation scheduler"
+      },
+      {
+        "type": "event_handler",
+        "name": "life_simulation_state_update",
+        "description": "Update states periodically"
+      },
+      {
+        "type": "event_handler",
+        "name": "life_simulation_message",
+        "description": "Process message events"
+      },
+      {
+        "type": "action",
+        "name": "perform_activity",
+        "description": "Perform scheduled activity (AI-driven)"
+      },
+      {
+        "type": "action",
+        "name": "handle_event",
+        "description": "Handle random event (AI-driven)"
+      },
+      {
+        "type": "tool",
+        "name": "get_life_simulation_habits",
+        "description": "Get personal habits information (speaking, behavior, interests, preferences)"
+      },
+      {
+        "type": "command",
+        "name": "life_status",
+        "description": "Query current status",
+        "pattern": "/life_status"
+      },
+      {
+        "type": "command",
+        "name": "life_schedule",
+        "description": "Query AI-generated schedule",
+        "pattern": "/life_schedule"
+      }
+    ],
+    "features": [
+      "AI-driven schedule generation (work, leisure, meals, daily routine)",
+      "AI-driven random event generation",
+      "Health status determined by random events and schedule",
+      "Habits from config or AI-generated based on personality",
+      "Holiday API integration for dynamic holiday detection",
+      "AI-driven emotion judgment based on multiple factors",
+      "Illness system: AI judges illness based on multiple factors",
+      "Auto-regenerate schedule based on health status",
+      "All prompts in config file (fully customizable)",
+      "AI-generated dialogue (no fixed messages)",
+      "Read-only physiological state data (cannot be modified by commands)",
+      "Configurable AI models (tool_use, planner, replyer, utils, vlm, voice, embedding, lpmm_entity_extract, lpmm_rdf_build)",
+      "Customizable time/date API",
+      "Prompts loaded from config file (not hardcoded)",
+      "User-friendly configuration file",
+      "Tool component for LLM to access habits information"
+    ],
+    "configuration": {
+      "auto_generate_config": true,
+      "config_file": "config.toml"
+    }
+  },
+  "changelog": {
+    "1.1.0": [
+      "Removed i18n system (user feedback)",
+      "Prompts moved from hardcoded to config file",
+      "Added configurable AI models (tool_use, planner, replyer)",
+      "Added customizable time/date API",
+      "Optimized configuration file structure for better readability",
+      "All user-facing text now in Chinese (simplified)",
+      "Added detailed Chinese comments in config file"
+    ],
+    "1.0.0": [
+      "Initial release - AI-driven version",
+      "Implemented AI-driven schedule generation system",
+      "Implemented AI-driven random event generation",
+      "Implemented health status determined by events and schedule",
+      "Implemented habits system (config + AI generation)",
+      "Implemented holiday API integration",
+      "Implemented AI-driven emotion judgment",
+      "Implemented editable AI prompts with well-designed defaults",
+      "Implemented state management and persistence",
+      "Added i18n support (zh-CN, en)",
+      "Added detailed bilingual configuration comments",
+      "Removed fixed schedule configuration (now AI-generated)",
+      "Removed timed events (replaced by AI-driven schedule)",
+      "All dialogue is AI-generated, not fixed",
+      "Physiological state data is read-only (cannot be modified by commands)"
+    ]
+  }
+}

@@ -1,0 +1,352 @@
+# ============================================================
+# LifeSimulationPlugin 配置文件
+# Event and Human Simulation Plugin Configuration
+# ============================================================
+#
+# 这是一个事件及人体模拟插件的配置文件
+# This is the configuration file for the Event and Human Simulation Plugin
+#
+# 配置说明 / Configuration Notes:
+# - 所有提示词都在此配置文件中 / All prompts are in this config file
+# - 可以直接修改提示词内容 / You can modify prompt content directly
+# - 模型配置可以指定使用哪个模型 / Model configuration can specify which model to use
+# - 默认模型类型: tool_use, planner, replyer / Default model types: tool_use, planner, replyer
+# - 留空表示使用系统默认模型 / Leave empty to use system default model
+#
+# ============================================================
+
+# ============================================================
+# [plugin] - 插件基础配置 / Basic Plugin Configuration
+# ============================================================
+[plugin]
+# 是否启用插件 / Enable plugin
+enabled = true
+
+# 状态更新间隔（秒）/ State update interval (seconds)
+# 建议：60-300秒 / Recommended: 60-300 seconds
+update_interval = 60
+
+# 数据目录 / Data directory
+# 相对于插件目录 / Relative to plugin directory
+data_dir = "data"
+
+# ============================================================
+# [ai] - AI模型配置 / AI Model Configuration
+# ============================================================
+[ai]
+# 日程生成模型配置 / Schedule generation model configuration
+# 留空使用 replyer 模型 / Leave empty to use replyer model
+# 可选值: tool_use, planner, replyer, utils, vlm, voice, embedding, lpmm_entity_extract, lpmm_rdf_build, 或具体模型名称
+# Options: tool_use, planner, replyer, utils, vlm, voice, embedding, lpmm_entity_extract, lpmm_rdf_build, or specific model name
+schedule_model = "replyer"
+
+# 随机事件生成模型配置 / Random event generation model configuration
+# 留空使用 tool_use 模型 / Leave empty to use tool_use model
+event_model = "tool_use"
+
+# 情绪判断模型配置 / Emotion judgment model configuration
+# 留空使用 planner 模型 / Leave empty to use planner model
+emotion_model = "planner"
+
+# 习惯生成模型配置 / Habit generation model configuration
+# 留空使用 replyer 模型 / Leave empty to use replyer model
+habit_model = "replyer"
+
+# AI温度 / AI temperature
+# 范围: 0.0-2.0，越高越随机 / Range: 0.0-2.0, higher means more random
+temperature = 0.7
+
+# AI最大token数 / AI max tokens
+# 建议: 500-2000 / Recommended: 500-2000
+max_tokens = 1000
+
+# ============================================================
+# 可用模型配置说明 / Available Model Configurations
+# ============================================================
+# utils - 工具模型（表情包、取名、关系、情绪等）/ Utility model (emoji, naming, relationship, emotion, etc.)
+# tool_use - 工具调用模型 / Tool calling model
+# replyer - 回复生成模型 / Reply generation model
+# planner - 决策模型 / Decision-making model
+# vlm - 图像识别模型 / Visual Language Model (image recognition)
+# voice - 语音识别模型 / Voice recognition model
+# embedding - 嵌入模型 / Embedding model (for knowledge base)
+# lpmm_entity_extract - 实体提取模型 / Entity extraction model
+# lpmm_rdf_build - RDF构建模型 / RDF building model
+
+# ============================================================
+# [prompts] - AI提示词配置 / AI Prompts Configuration
+# ============================================================
+[prompts]
+# 日程生成提示词 / Schedule generation prompt
+# 支持的变量 / Supported variables:
+#   {current_time} - 当前时间 / Current time
+#   {current_date} - 当前日期 / Current date
+#   {day_of_week} - 星期 / Day of week
+#   {is_weekend} - 是否周末 / Is weekend
+#   {is_holiday} - 是否节假日 / Is holiday
+#   {holiday_name} - 节日名称 / Holiday name
+#   {health_status} - 健康状态 / Health status
+#   {fatigue_level} - 疲劳度 / Fatigue level
+#   {hunger_level} - 饥饿度 / Hunger level
+#   {personality} - 人格特点 / Personality
+#   {habits} - 个人习惯 / Personal habits
+schedule_generation = """你是一个生活规划助手，需要为机器人生成今天的日程安排。
+
+请根据以下信息生成一个合理的日程：
+- 当前时间：{current_time}
+- 当前日期：{current_date}
+- 星期：{day_of_week}
+- 是否周末：{is_weekend}
+- 是否节假日：{is_holiday}
+- 当前健康状态：{health_status}
+- 当前疲劳度：{fatigue_level}/100
+- 当前饥饿度：{hunger_level}/100
+
+人格特点：
+{personality}
+
+个人习惯：
+{habits}
+
+请生成今天的日程安排，格式为JSON数组，每个元素包含：
+- time: 时间（HH:MM格式）
+- activity: 活动类型（work, leisure, meal, sleep, exercise, study, other）
+- description: 活动描述（简短说明）
+- priority: 优先级（1-5，5最高）
+
+注意：
+1. 日程要符合人格特点和个人习惯
+2. 如果健康状态不佳，要减少工作和运动，增加休息
+3. 如果疲劳度高，要安排更多休息
+4. 节假日可以安排更多休闲活动
+5. 确保三餐时间合理
+6. 确保有足够的睡眠时间
+
+请只返回JSON数组，不要有其他内容。"""
+
+# 随机事件生成提示词 / Random event generation prompt
+# 支持的变量 / Supported variables: 同上 / Same as above
+random_event_generation = """你是一个生活事件生成器，需要根据当前情况生成一个随机事件。
+
+当前情况：
+- 当前时间：{current_time}
+- 当前日期：{current_date}
+- 星期：{day_of_week}
+- 当前活动：{current_activity}
+- 当前健康状态：{health_status}
+- 当前疲劳度：{fatigue_level}/100
+- 当前饥饿度：{hunger_level}/100
+
+人格特点：
+{personality}
+
+请生成一个随机事件，格式为JSON对象，包含：
+- event_type: 事件类型（health, social, work, leisure, emotion, other）
+- event_name: 事件名称
+- event_description: 事件描述（详细说明）
+- health_impact: 对健康的影响（-10到10，负数表示有害，正数表示有益）
+- fatigue_impact: 对疲劳的影响（-10到10）
+- hunger_impact: 对饥饿的影响（-10到10）
+- emotion_impact: 对情绪的影响（-10到10）
+- probability: 发生概率（0.0-1.0）
+
+注意：
+1. 事件要符合当前情境
+2. 事件要符合人格特点
+3. 健康事件会影响健康状态
+4. 负面事件概率要低一些
+5. 事件描述要生动自然
+
+请只返回JSON对象，不要有其他内容。"""
+
+# 情绪判断提示词 / Emotion judgment prompt
+# 支持的变量 / Supported variables: 同上 + {recent_messages} / Same as above + {recent_messages}
+emotion_judgment = """你是一个情绪分析助手，需要判断机器人的当前情绪状态。
+
+当前情况：
+- 当前时间：{current_time}
+- 当前日期：{current_date}
+- 当前活动：{current_activity}
+- 当前健康状态：{health_status}
+- 当前疲劳度：{fatigue_level}/100
+- 当前饥饿度：{hunger_level}/100
+
+最近的消息：
+{recent_messages}
+
+人格特点：
+{personality}
+
+请分析机器人的当前情绪状态，格式为JSON对象，包含：
+- emotion: 情绪类型（happy, sad, angry, anxious, excited, calm, tired, bored）
+- intensity: 情绪强度（0-100）
+- reason: 情绪原因（简短说明）
+
+注意：
+1. 情绪要符合当前情境
+2. 情绪要符合人格特点
+3. 考虑生理状态对情绪的影响
+4. 考虑最近消息对情绪的影响
+5. 情绪强度要合理
+
+请只返回JSON对象，不要有其他内容。"""
+
+# 习惯生成提示词 / Habit generation prompt
+# 支持的变量 / Supported variables: {personality} / Personality
+habit_generation = """你是一个习惯分析助手，需要根据人格特点生成个人习惯。
+
+人格特点：
+{personality}
+
+请生成个人习惯，格式为JSON对象，包含：
+- speaking_habits: 说话习惯列表（如"喜欢用表情"、"喜欢用语气词"等）
+- behavior_habits: 行为习惯列表（如"早起"、"爱运动"、"爱读书"等）
+- interests: 兴趣爱好列表（如"音乐"、"电影"、"游戏"、"旅行"等）
+- preferences: 偏好设置（字典，包含food, music, movie等）
+
+注意：
+1. 习惯要符合人格特点
+2. 习惯要多样化
+3. 习惯要积极健康
+4. 说话习惯要自然
+
+请只返回JSON对象，不要有其他内容。"""
+
+# ============================================================
+# [habits] - 习惯配置 / Habits Configuration
+# ============================================================
+[habits]
+# 是否使用AI生成习惯 / Use AI to generate habits
+# true: 首次运行时AI自动生成 / true: AI generates on first run
+# false: 使用下面的手动配置 / false: Use manual configuration below
+use_ai_generation = true
+
+# 手动配置习惯（仅在 use_ai_generation = false 时生效）/ Manual habits (only when use_ai_generation = false)
+# 留空表示让AI生成 / Leave empty to let AI generate
+
+# 说话习惯 / Speaking habits
+speaking_habits = [
+    "喜欢用表情",
+    "喜欢用语气词",
+    "喜欢用网络用语"
+]
+
+# 行为习惯 / Behavior habits
+behavior_habits = [
+    "早起",
+    "爱运动",
+    "爱读书"
+]
+
+# 兴趣爱好 / Interests
+interests = [
+    "音乐",
+    "电影",
+    "游戏",
+    "旅行"
+]
+
+# 偏好设置 / Preferences
+[habits.preferences]
+# 食物偏好 / Food preference
+food = "甜食"
+
+# 音乐偏好 / Music preference
+music = "流行音乐"
+
+# 电影偏好 / Movie preference
+movie = "科幻"
+
+# ============================================================
+# [schedule] - 日程配置 / Schedule Configuration
+# ============================================================
+[schedule]
+# 是否每天重新生成日程 / Regenerate schedule daily
+# true: 每天自动重新生成 / true: Auto-regenerate daily
+# false: 使用上次生成的日程 / false: Use last generated schedule
+regenerate_daily = true
+
+# 随机事件触发概率 / Random event trigger probability
+# 范围: 0.0-1.0 / Range: 0.0-1.0
+# 0.0 = 不触发 / 0.0 = Never trigger
+# 0.1 = 每小时10%概率 / 0.1 = 10% probability per hour
+# 1.0 = 每小时必定触发 / 1.0 = Always trigger per hour
+random_event_probability = 0.1
+
+# ============================================================
+# [time_api] - 时间日期API配置 / Time and Date API Configuration
+# ============================================================
+[time_api]
+# 时间日期获取方式 / Time and date method
+# builtin: 使用内置datetime / builtin: Use built-in datetime
+# custom: 使用自定义API / custom: Use custom API
+method = "builtin"
+
+# 自定义时间API URL (仅在 method = "custom" 时生效)/ Custom time API URL (only when method = "custom")
+# 示例 / Example: "https://worldtimeapi.org/api/timezone/Asia/Shanghai"
+# 需要返回JSON格式，包含 datetime 字段 / Must return JSON with datetime field
+url = ""
+
+# 自定义时间API请求超时（秒）/ Custom time API request timeout (seconds)
+timeout = 5
+
+# ============================================================
+# [holiday_api] - 节日API配置 / Holiday API Configuration
+# ============================================================
+[holiday_api]
+# 是否启用节日检测 / Enable holiday detection
+enabled = true
+
+# 节日API URL / Holiday API URL
+# 默认使用 timor.tech 免费API / Default: timor.tech free API
+url = "https://timor.tech/api/holiday/info/{date}"
+
+# 节日信息缓存时长（秒）/ Holiday info cache duration (seconds)
+# 默认: 86400秒（24小时）/ Default: 86400 seconds (24 hours)
+cache_duration = 86400
+
+# 请求超时（秒）/ Request timeout (seconds)
+timeout = 5
+
+# ============================================================
+# [commands] - 命令配置 / Commands Configuration
+# ============================================================
+[commands]
+# 是否启用所有命令 / Enable all commands
+enabled = true
+
+# 状态查询命令 / Status query command
+[commands.status]
+enabled = true
+command = "/life_status"
+description = "查询当前状态 / Query current status"
+
+# 日程查询命令 / Schedule query command
+[commands.schedule]
+enabled = true
+command = "/life_schedule"
+description = "查询日程安排 / Query schedule"
+
+# ============================================================
+# [state] - 状态配置 / State Configuration
+# ============================================================
+[state]
+# 状态保存文件名 / State save filename
+# 相对于 data_dir / Relative to data_dir
+filename = "state.json"
+
+# 自动保存间隔（秒）/ Auto-save interval (seconds)
+# 0 = 不自动保存 / 0 = No auto-save
+# 建议: 300-600秒 / Recommended: 300-600 seconds
+auto_save_interval = 300
+
+# ============================================================
+# [logging] - 日志配置 / Logging Configuration
+# ============================================================
+[logging]
+# 日志级别 / Log level
+# 可选值: DEBUG, INFO, WARNING, ERROR / Options: DEBUG, INFO, WARNING, ERROR
+level = "INFO"
+
+# 是否记录详细日志 / Enable verbose logging
+verbose = false

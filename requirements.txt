@@ -1,0 +1,2 @@
+# LifeSimulationPlugin Dependencies
+# No external dependencies required
