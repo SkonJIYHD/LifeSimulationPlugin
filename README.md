@@ -391,7 +391,7 @@ A: 是的，如果启用了 `auto_regenerate_on_illness`，生病后会自动重
 
 ## 📄 许可证
 
-MIT License - 详见 [LICENSE](../../LICENSE) 文件
+MIT License - 详见 [LICENSE](/LICENSE) 文件
 
 ## 👥 作者
 
