@@ -3,7 +3,7 @@
   "id": "maibot.life_simulation_plugin",
   "name": "Life Simulation Plugin (AI-Driven)",
   "name_zh-CN": "事件及人体模拟插件（AI驱动）",
-  "version": "1.1.0",
+  "version": "1.5.0",
   "description": "AI-driven life simulation: schedule, events, habits, holidays, and emotion judgment for human-like behavior",
   "description_zh-CN": "AI驱动的生活模拟：日程、事件、习惯、节日和情绪判断，实现拟人化行为",
   "author": {
@@ -81,6 +81,16 @@
         "description": "Get personal habits information (speaking, behavior, interests, preferences)"
       },
       {
+        "type": "tool",
+        "name": "get_social_network_info",
+        "description": "Get social network information, including user relationships and intimacy"
+      },
+      {
+        "type": "tool",
+        "name": "set_user_relationship",
+        "description": "Set user relationship type (stranger, acquaintance, friend, close_friend, best_friend, family, partner, enemy, blocked)"
+      },
+      {
         "type": "command",
         "name": "life_status",
         "description": "Query current status",
@@ -109,7 +119,11 @@
       "Customizable time/date API",
       "Prompts loaded from config file (not hardcoded)",
       "User-friendly configuration file",
-      "Tool component for LLM to access habits information"
+      "Tool component for LLM to access habits information",
+      "Social network system for managing user relationships",
+      "Intimacy system with growth and decay mechanisms",
+      "AI-driven intimacy judgment based on interaction content",
+      "Tool component for LLM to set user relationship type (including enemy and blocked)"
     ],
     "configuration": {
       "auto_generate_config": true,
@@ -117,6 +131,42 @@
     }
   },
   "changelog": {
+    "1.5.0": [
+      "Added SetRelationshipTool for LLM to set user relationship type",
+      "AI can now set users as enemy or blocked",
+      "Added relationship change reason tracking",
+      "Updated GetSocialNetworkTool to be available for LLM",
+      "Improved social network system documentation"
+    ],
+    "1.4.0": [
+      "Implemented intimacy AI judgment growth method",
+      "Implemented intimacy probability growth method",
+      "Added intimacy_growth_method configuration (ai/probability/fixed)",
+      "Added intimacy judgment AI prompts",
+      "Intimacy growth based on message content with AI judgment",
+      "Support for probability growth (default 70% probability)",
+      "Support for fixed growth (fixed amount per interaction)",
+      "Updated documentation for intimacy growth mechanism"
+    ],
+    "1.3.0": [
+      "Implemented social network features",
+      "Added user relationship management (9 relationship types)",
+      "Implemented intimacy system (growth and decay)",
+      "Automatic user interaction history recording",
+      "Added SocialNetworkEventHandler",
+      "Added GetSocialNetworkTool",
+      "Added SocialNetworkCommand",
+      "Added social network configuration",
+      "Added social network AI prompts",
+      "Updated documentation for social network features"
+    ],
+    "1.2.0": [
+      "Optimized message state update mechanism to probability-based",
+      "Added message_state_update_probability configuration",
+      "Default 70% probability update for fatigue and hunger",
+      "Prevents excessive message causing rapid state growth",
+      "Updated documentation for probability update mechanism"
+    ],
     "1.1.0": [
       "Removed i18n system (user feedback)",
       "Prompts moved from hardcoded to config file",

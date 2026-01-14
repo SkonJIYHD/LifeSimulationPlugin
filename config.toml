@@ -212,6 +212,64 @@ habit_generation = """你是一个习惯分析助手，需要根据人格特点�
 
 请只返回JSON对象，不要有其他内容。"""
 
+# 社交网络分析提示词 / Social network analysis prompt
+# 支持的变量 / Supported variables: 同上 + {user_name}, {user_traits}, {relationship_type}, {intimacy}
+social_network_analysis = """你是一个社交关系分析助手，需要分析用户与机器人的关系。
+
+当前用户信息：
+- 用户名：{user_name}
+- 用户特征：{user_traits}
+- 关系类型：{relationship_type}
+- 亲密度：{intimacy}/100
+
+请分析以下内容：
+1. 用户与机器人的关系特点
+2. 用户的性格特征
+3. 用户的兴趣爱好
+4. 适合的回复风格
+
+请用简洁的语言描述，不超过200字。"""
+
+# 亲密度判断提示词 / Intimacy judgment prompt
+# 支持的变量 / Supported variables:
+#   {user_name} - 用户名 / User name
+#   {user_traits} - 用户特征 / User traits
+#   {relationship_type} - 关系类型 / Relationship type
+#   {intimacy} - 当前亲密度 / Current intimacy
+#   {interaction_count} - 互动次数 / Interaction count
+#   {message_content} - 消息内容 / Message content
+#   {current_emotion} - 当前情绪 / Current emotion
+intimacy_judgment = """你是一个亲密度判断助手，需要根据用户的互动判断是否应该增加亲密度，以及增加多少。
+
+当前用户信息：
+- 用户名：{user_name}
+- 用户特征：{user_traits}
+- 关系类型：{relationship_type}
+- 当前亲密度：{intimacy}/100
+- 互动次数：{interaction_count}
+- 当前情绪：{current_emotion}
+- 消息内容：{message_content}
+
+请判断：
+1. 这次互动是否应该增加亲密度？（是/否）
+2. 如果应该增加，增加多少？（0-5之间的整数）
+
+判断标准：
+- 正向互动（友好、有趣、支持等）应该增加亲密度
+- 负向互动（敌对、攻击、冷漠等）不应该增加亲密度
+- 中性互动可以少量增加或不增加
+- 亲密度越高，增加的幅度应该越小
+- 互动次数越多，增加的幅度应该越小
+
+请返回JSON格式：
+{
+  "should_increase": true/false,
+  "increase_amount": 0-5,
+  "reason": "判断原因"
+}
+
+只返回JSON，不要有其他内容。"""
+
 # ============================================================
 # [habits] - 习惯配置 / Habits Configuration
 # ============================================================
@@ -348,6 +406,45 @@ auto_save_interval = 300
 # 1.0 = 每次都更新 / 1.0 = Update every time
 # 建议: 0.3-0.8 / Recommended: 0.3-0.8
 message_state_update_probability = 0.7
+
+# ============================================================
+# [social_network] - 社交网络配置 / Social Network Configuration
+# ============================================================
+[social_network]
+# 是否启用社交网络 / Enable social network
+enabled = true
+
+# 亲密度增长方式 / Intimacy growth method
+# ai: AI判断是否增加亲密度及增加多少 / ai: AI determines if and how much intimacy increases
+# probability: 概率增加 / probability: Probability-based increase
+# fixed: 固定增加 / fixed: Fixed increase
+# 建议: ai / Recommended: ai
+intimacy_growth_method = "ai"
+
+# 亲密度增长率（仅在 growth_method = fixed 时生效）/ Intimacy growth rate (only when growth_method = fixed)
+# 每次互动增加的亲密度 / Intimacy increase per interaction
+# 建议: 1-5 / Recommended: 1-5
+intimacy_growth_rate = 1
+
+# 亲密度增长概率（仅在 growth_method = probability 时生效）/ Intimacy growth probability (only when growth_method = probability)
+# 每次互动增加亲密度的概率 / Probability of intimacy increase per interaction
+# 范围: 0.0-1.0 / Range: 0.0-1.0
+# 建议: 0.3-0.7 / Recommended: 0.3-0.7
+intimacy_growth_probability = 0.5
+
+# 亲密度AI判断模型（仅在 growth_method = ai 时生效）/ Intimacy AI judgment model (only when growth_method = ai)
+# 留空使用 replyer 模型 / Leave empty to use replyer model
+intimacy_ai_model = "replyer"
+
+# 亲密度衰减率 / Intimacy decay rate
+# 每次衰减减少的亲密度 / Intimacy decrease per decay
+# 建议: 0.1-1.0 / Recommended: 0.1-1.0
+intimacy_decay_rate = 0.1
+
+# 衰减间隔（秒）/ Decay interval (seconds)
+# 亲密度衰减的时间间隔 / Time interval for intimacy decay
+# 默认: 86400秒（24小时）/ Default: 86400 seconds (24 hours)
+decay_interval = 86400
 
 # ============================================================
 # [logging] - 日志配置 / Logging Configuration

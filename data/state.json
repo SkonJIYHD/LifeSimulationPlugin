@@ -20,5 +20,7 @@
   "preferences": {},
   "current_holiday": "",
   "is_holiday": false,
+  "social_network_enabled": true,
+  "social_network": {},
   "last_update": 0.0
 }

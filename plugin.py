@@ -27,7 +27,9 @@ import asyncio
 import json
 import os
 import random
-from datetime import datetime, time, date
+import time
+from dataclasses import dataclass
+from datetime import datetime, date
 from enum import Enum
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
@@ -81,6 +83,66 @@ class HealthStatus(Enum):
     SERIOUSLY_ILL = "seriously_ill"
 
 
+class RelationshipType(Enum):
+    """关系类型枚举 / Relationship Type Enum"""
+    STRANGER = "stranger"          # 陌生人
+    ACQUAINTANCE = "acquaintance"  # 熟人
+    FRIEND = "friend"              # 朋友
+    CLOSE_FRIEND = "close_friend"  # 好友
+    BEST_FRIEND = "best_friend"    # 挚友
+    FAMILY = "family"              # 家人
+    PARTNER = "partner"            # 伴侣
+    ENEMY = "enemy"                # 敌人
+    BLOCKED = "blocked"            # 拉黑
+
+
+@dataclass
+class UserRelationship:
+    """用户关系数据类 / User Relationship Data Class"""
+    user_id: str                  # 用户ID
+    user_name: str                # 用户名
+    relationship_type: RelationshipType  # 关系类型
+    intimacy: int                 # 亲密度（0-100）
+    interaction_count: int        # 互动次数
+    last_interaction_time: float  # 最后互动时间
+    traits: List[str]             # 用户特征（性格、兴趣爱好等）
+    notes: str                    # 备注
+
+    def __post_init__(self):
+        """初始化后处理 / Post-initialization"""
+        if self.intimacy < 0:
+            self.intimacy = 0
+        elif self.intimacy > 100:
+            self.intimacy = 100
+
+    def to_dict(self) -> Dict[str, Any]:
+        """转换为字典 / Convert to dictionary"""
+        return {
+            "user_id": self.user_id,
+            "user_name": self.user_name,
+            "relationship_type": self.relationship_type.value,
+            "intimacy": self.intimacy,
+            "interaction_count": self.interaction_count,
+            "last_interaction_time": self.last_interaction_time,
+            "traits": self.traits,
+            "notes": self.notes
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'UserRelationship':
+        """从字典创建 / Create from dictionary"""
+        return cls(
+            user_id=data.get("user_id", ""),
+            user_name=data.get("user_name", ""),
+            relationship_type=RelationshipType(data.get("relationship_type", RelationshipType.STRANGER.value)),
+            intimacy=data.get("intimacy", 0),
+            interaction_count=data.get("interaction_count", 0),
+            last_interaction_time=data.get("last_interaction_time", 0.0),
+            traits=data.get("traits", []),
+            notes=data.get("notes", "")
+        )
+
+
 # ============================================================
 # State Management / 状态管理
 # ============================================================
@@ -126,6 +188,10 @@ class LifeState:
         self.holiday_cache: Dict[str, str] = {}
         self.last_holiday_check: float = 0.0
 
+        # Social Network / 社交网络
+        self.social_network: Dict[str, UserRelationship] = {}  # 用户ID -> 用户关系
+        self.social_network_enabled: bool = True  # 是否启用社交网络
+
         # Update timestamp / 更新时间戳
         self.last_update: float = 0.0
 
@@ -153,6 +219,10 @@ class LifeState:
             "preferences": self.preferences,
             "current_holiday": self.current_holiday,
             "is_holiday": self.is_holiday,
+            "social_network_enabled": self.social_network_enabled,
+            "social_network": {
+                user_id: rel.to_dict() for user_id, rel in self.social_network.items()
+            },
             "last_update": self.last_update,
         }
 
@@ -180,9 +250,277 @@ class LifeState:
             self.preferences = data.get("preferences", {})
             self.current_holiday = data.get("current_holiday", "")
             self.is_holiday = data.get("is_holiday", False)
+            self.social_network_enabled = data.get("social_network_enabled", True)
+
+            # 加载社交网络数据 / Load social network data
+            social_network_data = data.get("social_network", {})
+            self.social_network = {}
+            for user_id, rel_data in social_network_data.items():
+                try:
+                    self.social_network[user_id] = UserRelationship.from_dict(rel_data)
+                except Exception as e:
+                    logger.warning(f"Failed to load relationship for user {user_id}: {e}")
+
             self.last_update = data.get("last_update", 0.0)
         except Exception as e:
             logger.error(f"Failed to load state from dict: {e}")
+
+
+# ============================================================
+# Social Network Management / 社交网络管理
+# ============================================================
+
+class SocialNetwork:
+    """社交网络管理类 / Social Network Management Class"""
+
+    def __init__(self, state: LifeState, config: Dict[str, Any], state_lock: asyncio.Lock):
+        """初始化社交网络管理器 / Initialize social network manager"""
+        self._state = state
+        self._config = config
+        self._state_lock = state_lock  # 使用传入的锁 / Use provided lock
+
+        # 配置参数 / Configuration parameters
+        self.enabled = config.get("enabled", True)
+        self.intimacy_growth_method = config.get("intimacy_growth_method", "ai")  # 亲密度增长方式
+        self.intimacy_growth_rate = config.get("intimacy_growth_rate", 1)  # 亲密度增长率（fixed方式）
+        self.intimacy_growth_probability = config.get("intimacy_growth_probability", 0.5)  # 亲密度增长概率（probability方式）
+        self.intimacy_ai_model = config.get("intimacy_ai_model", "replyer")  # 亲密度AI模型（ai方式）
+        self.intimacy_decay_rate = config.get("intimacy_decay_rate", 0.1)  # 亲密度衰减率
+        self.decay_interval = config.get("decay_interval", 86400)  # 衰减间隔（秒，默认24小时）
+        self.last_decay_time = time.time()
+
+    def is_enabled(self) -> bool:
+        """检查是否启用社交网络 / Check if social network is enabled"""
+        return self.enabled and self._state.social_network_enabled
+
+    async def add_or_update_user(self, user_id: str, user_name: str, traits: List[str] = None) -> UserRelationship:
+        """添加或更新用户 / Add or update user"""
+        if not self.is_enabled():
+            return None
+
+        async with self._state_lock:
+            if user_id not in self._state.social_network:
+                # 新用户，创建关系 / New user, create relationship
+                relationship = UserRelationship(
+                    user_id=user_id,
+                    user_name=user_name,
+                    relationship_type=RelationshipType.STRANGER,
+                    intimacy=0,
+                    interaction_count=0,
+                    last_interaction_time=time.time(),
+                    traits=traits or [],
+                    notes=""
+                )
+                self._state.social_network[user_id] = relationship
+                logger.info(f"Added new user to social network: {user_name} ({user_id})")
+            else:
+                # 更新现有用户 / Update existing user
+                relationship = self._state.social_network[user_id]
+                relationship.user_name = user_name
+                if traits:
+                    # 合并特征 / Merge traits
+                    for trait in traits:
+                        if trait not in relationship.traits:
+                            relationship.traits.append(trait)
+
+            return self._state.social_network[user_id]
+
+    async def record_interaction(self, user_id: str, interaction_type: str = "message", message_content: str = "", plugin_instance=None):
+        """记录互动 / Record interaction"""
+        if not self.is_enabled():
+            return
+
+        async with self._state_lock:
+            if user_id in self._state.social_network:
+                relationship = self._state.social_network[user_id]
+                relationship.interaction_count += 1
+                relationship.last_interaction_time = time.time()
+
+                # 根据增长方式增加亲密度 / Increase intimacy based on growth method
+                intimacy_increase = 0
+
+                if self.intimacy_growth_method == "ai":
+                    # AI判断 / AI judgment
+                    intimacy_increase = await self._judge_intimacy_increase(
+                        relationship, message_content, plugin_instance
+                    )
+                elif self.intimacy_growth_method == "probability":
+                    # 概率判断 / Probability judgment
+                    import random
+                    if random.random() < self.intimacy_growth_probability:
+                        intimacy_increase = self.intimacy_growth_rate
+                else:
+                    # 固定增长 / Fixed increase
+                    intimacy_increase = self.intimacy_growth_rate
+
+                # 增加亲密度 / Increase intimacy
+                if intimacy_increase > 0:
+                    relationship.intimacy = min(100, relationship.intimacy + intimacy_increase)
+
+                # 更新关系类型 / Update relationship type
+                self._update_relationship_type(relationship)
+
+    async def _judge_intimacy_increase(self, relationship: UserRelationship, message_content: str, plugin_instance) -> int:
+        """AI判断是否增加亲密度及增加多少 / AI judgment for intimacy increase"""
+        try:
+            if not plugin_instance:
+                return 0
+
+            # Build prompt / 构建提示词
+            prompt = plugin_instance._get_prompt(
+                "intimacy_judgment",
+                user_name=relationship.user_name,
+                user_traits=", ".join(relationship.traits),
+                relationship_type=relationship.relationship_type.value,
+                intimacy=relationship.intimacy,
+                interaction_count=relationship.interaction_count,
+                message_content=message_content[:500] if message_content else "",  # 限制消息长度
+                current_emotion=self._state.current_emotion
+            )
+
+            # Call LLM / 调用LLM
+            temperature = plugin_instance.get_config("ai.temperature", 0.7)
+            max_tokens = plugin_instance.get_config("ai.max_tokens", 500)
+
+            model_config = plugin_instance._get_model_config(self.intimacy_ai_model)
+            if not model_config:
+                logger.error(f"Model config not found for {self.intimacy_ai_model}")
+                return 0
+
+            success, response, reasoning, model_used = await llm_api.generate_with_model(
+                prompt=prompt,
+                model_config=model_config,
+                temperature=temperature,
+                max_tokens=max_tokens
+            )
+
+            if not success:
+                logger.error(f"Failed to judge intimacy: {response}")
+                return 0
+
+            # Parse response / 解析响应
+            try:
+                result = json.loads(response)
+                should_increase = result.get("should_increase", False)
+                increase_amount = result.get("increase_amount", 0)
+
+                if should_increase and increase_amount > 0:
+                    logger.info(f"AI judgment: increase intimacy by {increase_amount} for {relationship.user_name}")
+                    return max(0, min(5, increase_amount))  # 限制在0-5之间
+                else:
+                    logger.debug(f"AI judgment: no intimacy increase for {relationship.user_name}")
+                    return 0
+            except json.JSONDecodeError:
+                logger.error(f"Failed to parse intimacy judgment JSON: {response}")
+                return 0
+
+        except Exception as e:
+            logger.error(f"Failed to judge intimacy increase: {e}", exc_info=True)
+            return 0
+
+    def _update_relationship_type(self, relationship: UserRelationship):
+        """根据亲密度更新关系类型 / Update relationship type based on intimacy"""
+        intimacy = relationship.intimacy
+
+        if relationship.relationship_type == RelationshipType.BLOCKED:
+            return  # 拉黑的用户不更新关系类型
+
+        if intimacy >= 80:
+            relationship.relationship_type = RelationshipType.BEST_FRIEND
+        elif intimacy >= 60:
+            relationship.relationship_type = RelationshipType.CLOSE_FRIEND
+        elif intimacy >= 40:
+            relationship.relationship_type = RelationshipType.FRIEND
+        elif intimacy >= 20:
+            relationship.relationship_type = RelationshipType.ACQUAINTANCE
+        else:
+            relationship.relationship_type = RelationshipType.STRANGER
+
+    async def decay_intimacy(self):
+        """衰减亲密度 / Decay intimacy"""
+        if not self.is_enabled():
+            return
+
+        current_time = time.time()
+        if current_time - self.last_decay_time < self.decay_interval:
+            return
+
+        async with self._state_lock:
+            for user_id, relationship in self._state.social_network.items():
+                if relationship.relationship_type in [RelationshipType.BLOCKED, RelationshipType.FAMILY, RelationshipType.PARTNER]:
+                    continue  # 拉黑、家人、伴侣不衰减
+
+                # 衰减亲密度 / Decay intimacy
+                relationship.intimacy = max(0, relationship.intimacy - self.intimacy_decay_rate)
+
+                # 更新关系类型 / Update relationship type
+                self._update_relationship_type(relationship)
+
+            self.last_decay_time = current_time
+            logger.debug("Decayed intimacy for all relationships")
+
+    def get_relationship(self, user_id: str) -> Optional[UserRelationship]:
+        """获取用户关系 / Get user relationship"""
+        if not self.is_enabled():
+            return None
+        return self._state.social_network.get(user_id)
+
+    def get_all_relationships(self) -> Dict[str, UserRelationship]:
+        """获取所有关系 / Get all relationships"""
+        if not self.is_enabled():
+            return {}
+        return self._state.social_network.copy()
+
+    async def set_relationship_type(self, user_id: str, relationship_type: RelationshipType):
+        """设置关系类型 / Set relationship type"""
+        if not self.is_enabled():
+            return
+
+        async with self._state_lock:
+            if user_id in self._state.social_network:
+                self._state.social_network[user_id].relationship_type = relationship_type
+                logger.info(f"Set relationship type for {user_id} to {relationship_type.value}")
+
+    async def set_notes(self, user_id: str, notes: str):
+        """设置备注 / Set notes"""
+        if not self.is_enabled():
+            return
+
+        async with self._state_lock:
+            if user_id in self._state.social_network:
+                self._state.social_network[user_id].notes = notes
+
+    def get_relationship_summary(self, user_id: str) -> Optional[str]:
+        """获取关系摘要 / Get relationship summary"""
+        if not self.is_enabled():
+            return None
+
+        relationship = self.get_relationship(user_id)
+        if not relationship:
+            return None
+
+        relationship_type_cn = {
+            RelationshipType.STRANGER: "陌生人",
+            RelationshipType.ACQUAINTANCE: "熟人",
+            RelationshipType.FRIEND: "朋友",
+            RelationshipType.CLOSE_FRIEND: "好友",
+            RelationshipType.BEST_FRIEND: "挚友",
+            RelationshipType.FAMILY: "家人",
+            RelationshipType.PARTNER: "伴侣",
+            RelationshipType.ENEMY: "敌人",
+            RelationshipType.BLOCKED: "拉黑"
+        }.get(relationship.relationship_type, relationship.relationship_type.value)
+
+        summary = f"👤 {relationship.user_name}\n"
+        summary += f"🔗 关系: {relationship_type_cn}\n"
+        summary += f"💕 亲密度: {relationship.intimacy}/100\n"
+        summary += f"💬 互动次数: {relationship.interaction_count}\n"
+        if relationship.traits:
+            summary += f"🏷️ 特征: {', '.join(relationship.traits)}\n"
+        if relationship.notes:
+            summary += f"📝 备注: {relationship.notes}\n"
+
+        return summary
 
 
 # ============================================================
@@ -317,6 +655,7 @@ class LifeSimulationPlugin(BasePlugin):
         "schedule": "日程配置 / Schedule Configuration",
         "time_api": "时间日期API配置 / Time and Date API Configuration",
         "holiday_api": "节日API配置 / Holiday API Configuration",
+        "social_network": "社交网络配置 / Social Network Configuration",
         "commands": "命令配置 / Commands Configuration",
         "state": "状态配置 / State Configuration",
         "logging": "日志配置 / Logging Configuration",
@@ -392,6 +731,30 @@ class LifeSimulationPlugin(BasePlugin):
         "state": {
             "filename": ConfigField(type=str, default="state.json", description="状态保存文件名 / State save filename"),
             "auto_save_interval": ConfigField(type=int, default=300, description="自动保存间隔（秒）/ Auto-save interval (seconds)"),
+            "message_state_update_probability": ConfigField(
+                type=float, 
+                default=0.7, 
+                description="消息状态更新概率（0.0-1.0）/ Message state update probability (0.0-1.0)"
+            ),
+        },
+        "social_network": {
+            "enabled": ConfigField(type=bool, default=True, description="启用社交网络 / Enable social network"),
+            "intimacy_growth_method": ConfigField(
+                type=str, 
+                default="ai", 
+                description="亲密度增长方式 / Intimacy growth method",
+                choices=["ai", "probability", "fixed"]
+            ),
+            "intimacy_growth_rate": ConfigField(type=int, default=1, description="亲密度增长率（fixed方式）/ Intimacy growth rate (fixed mode)"),
+            "intimacy_growth_probability": ConfigField(type=float, default=0.5, description="亲密度增长概率（probability方式）/ Intimacy growth probability (probability mode)"),
+            "intimacy_ai_model": ConfigField(
+                type=str, 
+                default="replyer", 
+                description="亲密度AI判断模型（ai方式）/ Intimacy AI judgment model (ai mode)",
+                choices=["tool_use", "planner", "replyer", "utils", "vlm", "voice", "embedding", "lpmm_entity_extract", "lpmm_rdf_build"]
+            ),
+            "intimacy_decay_rate": ConfigField(type=float, default=0.1, description="亲密度衰减率 / Intimacy decay rate"),
+            "decay_interval": ConfigField(type=int, default=86400, description="衰减间隔（秒）/ Decay interval (seconds)"),
         },
         "logging": {
             "level": ConfigField(type=str, default="INFO", description="日志级别 / Log level"),
@@ -889,6 +1252,16 @@ verbose = false
         self._time_api = TimeAPI(self.get_config("time_api", {}))
         self._holiday_api = HolidayAPI(self.get_config("holiday_api", {}))
 
+        # Social Network / 社交网络
+        self._social_network = SocialNetwork(
+            self._state,
+            self.get_config("social_network", {}),
+            self._state_lock
+        )
+
+        # Available models / 可用模型
+        self._available_models = llm_api.get_available_models()
+
         # Data directory / 数据目录
         plugin_dir = Path(self.plugin_dir).resolve()
         self._data_dir = plugin_dir / self.get_config("plugin.data_dir", "data")
@@ -912,6 +1285,8 @@ verbose = false
 
             # Tools / 工具
             (GetHabitsTool.get_tool_info(), GetHabitsTool),
+            (GetSocialNetworkTool.get_tool_info(), GetSocialNetworkTool),
+            (SetRelationshipTool.get_tool_info(), SetRelationshipTool),
         ]
 
         # Commands / 命令
@@ -1066,6 +1441,16 @@ verbose = false
         logger.warning(f"Prompt not found: {prompt_type}")
         return ""
 
+    def _get_model_config(self, model_name: str) -> Any:
+        """获取模型配置 / Get model config"""
+        if model_name in self._available_models:
+            return self._available_models[model_name]
+        else:
+            logger.warning(f"Model not found: {model_name}, using first available model")
+            if self._available_models:
+                return list(self._available_models.values())[0]
+            return None
+
     # ============================================================
     # AI Generation / AI生成
     # ============================================================
@@ -1109,16 +1494,25 @@ verbose = false
             )
 
             # Call LLM / 调用LLM
-            model = self.get_config("ai.schedule_model", "replyer")
+            model_name = self.get_config("ai.schedule_model", "replyer")
+            model_config = self._get_model_config(model_name)
+            if not model_config:
+                logger.error(f"Model config not found for {model_name}")
+                return []
+
             temperature = self.get_config("ai.temperature", 0.7)
             max_tokens = self.get_config("ai.max_tokens", 1000)
 
-            response = await llm_api.generate_with_model(
+            success, response, reasoning, model_used = await llm_api.generate_with_model(
                 prompt=prompt,
-                model_config=model,
+                model_config=model_config,
                 temperature=temperature,
                 max_tokens=max_tokens
             )
+
+            if not success:
+                logger.error(f"Failed to generate schedule: {response}")
+                return []
 
             # Parse response / 解析响应
             try:
@@ -1166,16 +1560,25 @@ verbose = false
             )
 
             # Call LLM / 调用LLM
-            model = self.get_config("ai.event_model", "tool_use")
+            model_name = self.get_config("ai.event_model", "tool_use")
+            model_config = self._get_model_config(model_name)
+            if not model_config:
+                logger.error(f"Model config not found for {model_name}")
+                return None
+
             temperature = self.get_config("ai.temperature", 0.7)
             max_tokens = self.get_config("ai.max_tokens", 1000)
 
-            response = await llm_api.generate_with_model(
+            success, response, reasoning, model_used = await llm_api.generate_with_model(
                 prompt=prompt,
-                model_config=model,
+                model_config=model_config,
                 temperature=temperature,
                 max_tokens=max_tokens
             )
+
+            if not success:
+                logger.error(f"Failed to generate event: {response}")
+                return None
 
             # Parse response / 解析响应
             try:
@@ -1221,16 +1624,25 @@ verbose = false
             )
 
             # Call LLM / 调用LLM
-            model = self.get_config("ai.emotion_model", "planner")
+            model_name = self.get_config("ai.emotion_model", "planner")
+            model_config = self._get_model_config(model_name)
+            if not model_config:
+                logger.error(f"Model config not found for {model_name}")
+                return "calm", 0, ""
+
             temperature = self.get_config("ai.temperature", 0.7)
             max_tokens = self.get_config("ai.max_tokens", 500)
 
-            response = await llm_api.generate_with_model(
+            success, response, reasoning, model_used = await llm_api.generate_with_model(
                 prompt=prompt,
-                model_config=model,
+                model_config=model_config,
                 temperature=temperature,
                 max_tokens=max_tokens
             )
+
+            if not success:
+                logger.error(f"Failed to judge emotion: {response}")
+                return "calm", 0, ""
 
             # Parse response / 解析响应
             try:
@@ -1264,16 +1676,25 @@ verbose = false
             prompt = self._get_prompt("habit_generation", personality=personality)
 
             # Call LLM / 调用LLM
-            model = self.get_config("ai.habit_model", "replyer")
+            model_name = self.get_config("ai.habit_model", "replyer")
+            model_config = self._get_model_config(model_name)
+            if not model_config:
+                logger.error(f"Model config not found for {model_name}")
+                return False
+
             temperature = self.get_config("ai.temperature", 0.7)
             max_tokens = self.get_config("ai.max_tokens", 500)
 
-            response = await llm_api.generate_with_model(
+            success, response, reasoning, model_used = await llm_api.generate_with_model(
                 prompt=prompt,
-                model_config=model,
+                model_config=model_config,
                 temperature=temperature,
                 max_tokens=max_tokens
             )
+
+            if not success:
+                logger.error(f"Failed to generate habits: {response}")
+                return False
 
             # Parse response / 解析响应
             try:
@@ -1303,7 +1724,7 @@ verbose = false
         """获取人格描述 / Get personality description"""
         try:
             from src.config.config import global_config
-            personality_file = global_config.get("personality.personality_file", "")
+            personality_file = getattr(global_config.personality, 'personality_file', '')
             if personality_file and os.path.exists(personality_file):
                 with open(personality_file, 'r', encoding='utf-8') as f:
                     return f.read()[:500]  # Limit to 500 chars
@@ -1535,6 +1956,45 @@ class MessageEventHandler(BaseEventHandler):
         return True, True, None, None, None
 
 
+class SocialNetworkEventHandler(BaseEventHandler):
+    """社交网络事件处理器 / Social Network Event Handler"""
+
+    event_type = EventType.ON_MESSAGE
+    handler_name = "life_simulation_social_network"
+    handler_description = "Process social network interactions / 处理社交网络互动"
+    weight = 5
+
+    async def execute(self, message: MaiMessages | None) -> Tuple[bool, bool, Optional[str], None, None]:
+        if not _plugin_instance or not message:
+            return True, True, None, None, None
+
+        # 检查是否启用社交网络 / Check if social network is enabled
+        if not _plugin_instance._social_network or not _plugin_instance._social_network.is_enabled():
+            return True, True, None, None, None
+
+        try:
+            # 获取发送者信息 / Get sender information
+            user_id = str(message.sender_id) if hasattr(message, 'sender_id') else ""
+            user_name = message.sender_name if hasattr(message, 'sender_name') else "Unknown"
+            message_content = message.plain_text if hasattr(message, 'plain_text') else ""
+
+            if not user_id:
+                return True, True, None, None, None
+
+            # 添加或更新用户 / Add or update user
+            _plugin_instance._social_network.add_or_update_user(user_id, user_name)
+
+            # 记录互动 / Record interaction
+            await _plugin_instance._social_network.record_interaction(
+                user_id, "message", message_content, _plugin_instance
+            )
+
+        except Exception as e:
+            logger.error(f"Error in social network event handler: {e}")
+
+        return True, True, None, None, None
+
+
 # ============================================================
 # Actions / 动作
 # ============================================================
@@ -1710,6 +2170,88 @@ class ScheduleCommand(BaseCommand):
             return False, None, 0
 
 
+class SocialNetworkCommand(BaseCommand):
+    """社交网络查询命令 / Social Network Query Command"""
+
+    command_name = "life_social"
+    command_description = "查询社交网络信息 / Query social network"
+    command_pattern = r"^/life_social(?:\s+(?P<action>list|detail))?(?:\s+(?P<user_id>\S+))?$"
+
+    async def execute(self) -> Tuple[bool, Optional[str], int]:
+        if not _plugin_instance:
+            await self.send_text("插件未就绪", storage_message=False)
+            return False, None, 0
+
+        if not _plugin_instance.get_config("commands.enabled", True):
+            await self.send_text("命令已禁用", storage_message=False)
+            return False, None, 0
+
+        try:
+            args = self.get_args()
+            action = args.get("action", "list")
+            user_id = args.get("user_id", "")
+
+            if not _plugin_instance._social_network or not _plugin_instance._social_network.is_enabled():
+                await self.send_text("社交网络功能未启用", storage_message=False)
+                return False, None, 0
+
+            if action == "detail" and user_id:
+                # 查询特定用户的详细信息 / Query specific user details
+                relationship = _plugin_instance._social_network.get_relationship(user_id)
+                if relationship:
+                    summary = _plugin_instance._social_network.get_relationship_summary(user_id)
+                    await self.send_text(summary, storage_message=False)
+                else:
+                    await self.send_text(f"未找到用户 {user_id} 的关系信息", storage_message=False)
+            else:
+                # 显示所有用户的列表 / Show all users list
+                all_relationships = _plugin_instance._social_network.get_all_relationships()
+
+                if not all_relationships:
+                    await self.send_text("👥 社交网络中暂无用户", storage_message=False)
+                    return True, None, 1
+
+                # 按亲密度排序 / Sort by intimacy
+                sorted_relationships = sorted(
+                    all_relationships.values(),
+                    key=lambda r: r.intimacy,
+                    reverse=True
+                )
+
+                # 构建列表消息 / Build list message
+                msg = f"👥 社交网络概览（共 {len(sorted_relationships)} 人）：\n\n"
+
+                for i, rel in enumerate(sorted_relationships[:20], 1):  # 只显示前20个 / Show only top 20
+                    relationship_type_cn = {
+                        RelationshipType.STRANGER: "陌生人",
+                        RelationshipType.ACQUAINTANCE: "熟人",
+                        RelationshipType.FRIEND: "朋友",
+                        RelationshipType.CLOSE_FRIEND: "好友",
+                        RelationshipType.BEST_FRIEND: "挚友",
+                        RelationshipType.FAMILY: "家人",
+                        RelationshipType.PARTNER: "伴侣",
+                        RelationshipType.ENEMY: "敌人",
+                        RelationshipType.BLOCKED: "拉黑"
+                    }.get(rel.relationship_type, rel.relationship_type.value)
+
+                    msg += f"{i}. {rel.user_name}\n"
+                    msg += f"   🔗 {relationship_type_cn} | 💕 {rel.intimacy}/100 | 💬 {rel.interaction_count}次互动\n"
+                    if rel.notes:
+                        msg += f"   📝 {rel.notes}\n"
+                    msg += "\n"
+
+                if len(sorted_relationships) > 20:
+                    msg += f"... 还有 {len(sorted_relationships) - 20} 人未显示\n"
+
+                await self.send_text(msg, storage_message=False)
+
+            return True, None, 1
+        except Exception as e:
+            logger.error(f"SocialNetworkCommand failed: {e}", exc_info=True)
+            await self.send_text(f"操作失败: {str(e)}", storage_message=False)
+            return False, None, 0
+
+
 # ============================================================
 # Tools / 工具
 # ============================================================
@@ -1767,5 +2309,241 @@ class GetHabitsTool(BaseTool):
             return {
                 "name": self.name,
                 "content": f"获取习惯信息失败: {str(e)}",
+                "error": str(e)
+            }
+
+
+class GetSocialNetworkTool(BaseTool):
+    """获取社交网络工具 / Get Social Network Tool"""
+
+    name = "get_social_network_info"
+    description = "获取社交网络信息，包括用户关系、亲密度和互动历史。可以查询特定用户的关系，或获取所有用户的摘要。"
+    parameters = [
+        {
+            "name": "user_id",
+            "type": "string",
+            "description": "用户ID（可选），如果提供则查询该用户的详细关系信息，如果不提供则返回所有用户的摘要",
+            "required": False
+        }
+    ]
+    available_for_llm = True
+
+    async def execute(self, function_args: dict[str, Any]) -> dict[str, Any]:
+        """执行工具 / Execute tool"""
+        try:
+            if not _plugin_instance or not _plugin_instance._social_network:
+                return {
+                    "name": self.name,
+                    "content": "社交网络功能未启用",
+                    "error": "Social network not enabled"
+                }
+
+            user_id = function_args.get("user_id", "")
+
+            if user_id:
+                # 查询特定用户 / Query specific user
+                relationship = _plugin_instance._social_network.get_relationship(user_id)
+                if relationship:
+                    summary = _plugin_instance._social_network.get_relationship_summary(user_id)
+                    return {
+                        "name": self.name,
+                        "content": summary,
+                        "relationship": relationship.to_dict()
+                    }
+                else:
+                    return {
+                        "name": self.name,
+                        "content": f"未找到用户 {user_id} 的关系信息",
+                        "relationship": None
+                    }
+            else:
+                # 返回所有用户的摘要 / Return summary of all users
+                all_relationships = _plugin_instance._social_network.get_all_relationships()
+
+                if not all_relationships:
+                    return {
+                        "name": self.name,
+                        "content": "社交网络中暂无用户",
+                        "relationships": []
+                    }
+
+                # 按亲密度排序 / Sort by intimacy
+                sorted_relationships = sorted(
+                    all_relationships.values(),
+                    key=lambda r: r.intimacy,
+                    reverse=True
+                )
+
+                # 构建摘要文本 / Build summary text
+                summary_lines = [f"👥 社交网络概览（共 {len(sorted_relationships)} 人）：\n"]
+
+                for rel in sorted_relationships[:10]:  # 只显示前10个 / Show only top 10
+                    relationship_type_cn = {
+                        RelationshipType.STRANGER: "陌生人",
+                        RelationshipType.ACQUAINTANCE: "熟人",
+                        RelationshipType.FRIEND: "朋友",
+                        RelationshipType.CLOSE_FRIEND: "好友",
+                        RelationshipType.BEST_FRIEND: "挚友",
+                        RelationshipType.FAMILY: "家人",
+                        RelationshipType.PARTNER: "伴侣",
+                        RelationshipType.ENEMY: "敌人",
+                        RelationshipType.BLOCKED: "拉黑"
+                    }.get(rel.relationship_type, rel.relationship_type.value)
+
+                    summary_lines.append(
+                        f"• {rel.user_name}: {relationship_type_cn} (亲密度: {rel.intimacy}/100, 互动: {rel.interaction_count}次)"
+                    )
+
+                return {
+                    "name": self.name,
+                    "content": "\n".join(summary_lines),
+                    "relationships": [rel.to_dict() for rel in sorted_relationships],
+                    "total_count": len(sorted_relationships)
+                }
+        except Exception as e:
+            logger.error(f"GetSocialNetworkTool failed: {e}", exc_info=True)
+            return {
+                "name": self.name,
+                "content": f"获取社交网络信息失败: {str(e)}",
+                "error": str(e)
+            }
+
+
+class SetRelationshipTool(BaseTool):
+    """设置关系工具 / Set Relationship Tool"""
+
+    name = "set_user_relationship"
+    description = "设置用户的关系类型，包括陌生人、熟人、朋友、好友、挚友、家人、伴侣、敌人、拉黑。注意：拉黑和敌人关系需要谨慎使用。"
+    parameters = [
+        {
+            "name": "user_id",
+            "type": "string",
+            "description": "用户ID，要设置关系的用户",
+            "required": True
+        },
+        {
+            "name": "relationship_type",
+            "type": "string",
+            "description": "关系类型，可选值：stranger(陌生人), acquaintance(熟人), friend(朋友), close_friend(好友), best_friend(挚友), family(家人), partner(伴侣), enemy(敌人), blocked(拉黑)",
+            "required": True
+        },
+        {
+            "name": "reason",
+            "type": "string",
+            "description": "设置关系的原因（可选），用于记录",
+            "required": False
+        }
+    ]
+    available_for_llm = True
+
+    async def execute(self, function_args: dict[str, Any]) -> dict[str, Any]:
+        """执行工具 / Execute tool"""
+        try:
+            if not _plugin_instance or not _plugin_instance._social_network:
+                return {
+                    "name": self.name,
+                    "content": "社交网络功能未启用",
+                    "error": "Social network not enabled"
+                }
+
+            user_id = function_args.get("user_id", "")
+            relationship_type_str = function_args.get("relationship_type", "")
+            reason = function_args.get("reason", "")
+
+            if not user_id:
+                return {
+                    "name": self.name,
+                    "content": "缺少必要参数：user_id",
+                    "error": "Missing required parameter: user_id"
+                }
+
+            if not relationship_type_str:
+                return {
+                    "name": self.name,
+                    "content": "缺少必要参数：relationship_type",
+                    "error": "Missing required parameter: relationship_type"
+                }
+
+            # 映射关系类型字符串到枚举 / Map relationship type string to enum
+            relationship_map = {
+                "stranger": RelationshipType.STRANGER,
+                "acquaintance": RelationshipType.ACQUAINTANCE,
+                "friend": RelationshipType.FRIEND,
+                "close_friend": RelationshipType.CLOSE_FRIEND,
+                "best_friend": RelationshipType.BEST_FRIEND,
+                "family": RelationshipType.FAMILY,
+                "partner": RelationshipType.PARTNER,
+                "enemy": RelationshipType.ENEMY,
+                "blocked": RelationshipType.BLOCKED
+            }
+
+            relationship_type = relationship_map.get(relationship_type_str.lower())
+            if not relationship_type:
+                return {
+                    "name": self.name,
+                    "content": f"无效的关系类型：{relationship_type_str}，有效值：stranger, acquaintance, friend, close_friend, best_friend, family, partner, enemy, blocked",
+                    "error": f"Invalid relationship type: {relationship_type_str}"
+                }
+
+            # 检查用户是否存在 / Check if user exists
+            relationship = _plugin_instance._social_network.get_relationship(user_id)
+            if not relationship:
+                return {
+                    "name": self.name,
+                    "content": f"未找到用户 {user_id} 的关系信息",
+                    "error": f"User {user_id} not found in social network"
+                }
+
+            # 保存旧关系类型 / Save old relationship type
+            old_type = relationship.relationship_type
+
+            # 设置新的关系类型 / Set new relationship type
+            await _plugin_instance._social_network.set_relationship_type(user_id, relationship_type)
+
+            # 如果有原因，更新备注 / If reason provided, update notes
+            if reason:
+                current_notes = relationship.notes or ""
+                new_notes = f"{current_notes}\n" if current_notes else ""
+                new_notes += f"关系变更: {old_type.value} -> {relationship_type.value} (原因: {reason})"
+                await _plugin_instance._social_network.set_notes(user_id, new_notes)
+
+            # 构建中文名称映射 / Build Chinese name mapping
+            relationship_type_cn = {
+                RelationshipType.STRANGER: "陌生人",
+                RelationshipType.ACQUAINTANCE: "熟人",
+                RelationshipType.FRIEND: "朋友",
+                RelationshipType.CLOSE_FRIEND: "好友",
+                RelationshipType.BEST_FRIEND: "挚友",
+                RelationshipType.FAMILY: "家人",
+                RelationshipType.PARTNER: "伴侣",
+                RelationshipType.ENEMY: "敌人",
+                RelationshipType.BLOCKED: "拉黑"
+            }
+
+            old_type_cn = relationship_type_cn.get(old_type, old_type.value)
+            new_type_cn = relationship_type_cn.get(relationship_type, relationship_type.value)
+
+            result_message = f"已将用户 {relationship.user_name} 的关系从 {old_type_cn} 更改为 {new_type_cn}"
+            if reason:
+                result_message += f"\n原因: {reason}"
+
+            # 记录日志 / Log the change
+            logger.info(f"Set relationship for user {user_id}: {old_type.value} -> {relationship_type.value}")
+
+            return {
+                "name": self.name,
+                "content": result_message,
+                "success": True,
+                "user_id": user_id,
+                "user_name": relationship.user_name,
+                "old_relationship": old_type.value,
+                "new_relationship": relationship_type.value
+            }
+
+        except Exception as e:
+            logger.error(f"SetRelationshipTool failed: {e}", exc_info=True)
+            return {
+                "name": self.name,
+                "content": f"设置关系失败: {str(e)}",
                 "error": str(e)
             }
