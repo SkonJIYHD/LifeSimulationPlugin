@@ -1522,11 +1522,15 @@ class MessageEventHandler(BaseEventHandler):
         if not _plugin_instance or not message:
             return True, True, None, None, None
 
-        # Slight increase in fatigue and hunger on message
-        # 消息时略微增加疲劳度和饥饿度
-        async with _plugin_instance._state_lock:
-            _plugin_instance._state.fatigue = min(100, _plugin_instance._state.fatigue + 1)
-            _plugin_instance._state.hunger = min(100, _plugin_instance._state.hunger + 1)
+        # Slight increase in fatigue and hunger on message with probability
+        # 消息时按概率略微增加疲劳度和饥饿度
+        import random
+
+        update_probability = _plugin_instance._config.get("message_state_update_probability", 0.7)
+        if random.random() < update_probability:
+            async with _plugin_instance._state_lock:
+                _plugin_instance._state.fatigue = min(100, _plugin_instance._state.fatigue + 1)
+                _plugin_instance._state.hunger = min(100, _plugin_instance._state.hunger + 1)
 
         return True, True, None, None, None
 

@@ -340,6 +340,15 @@ filename = "state.json"
 # 建议: 300-600秒 / Recommended: 300-600 seconds
 auto_save_interval = 300
 
+# 消息状态更新概率 / Message state update probability
+# 每次收到消息时，按此概率增加疲劳度和饥饿度
+# 范围: 0.0-1.0 / Range: 0.0-1.0
+# 0.0 = 永不更新 / 0.0 = Never update
+# 0.7 = 70%概率更新 / 0.7 = 70% probability to update
+# 1.0 = 每次都更新 / 1.0 = Update every time
+# 建议: 0.3-0.8 / Recommended: 0.3-0.8
+message_state_update_probability = 0.7
+
 # ============================================================
 # [logging] - 日志配置 / Logging Configuration
 # ============================================================
