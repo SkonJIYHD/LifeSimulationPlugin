@@ -10,7 +10,7 @@
     "name": "MaiBot Team",
     "url": "https://github.com/Mai-with-u/MaiBot"
   },
-  "license": "MIT",
+  "license": "AGPL-3.0-or-later",
   "host_application": {
     "min_version": "0.12.0",
     "max_version": ""
