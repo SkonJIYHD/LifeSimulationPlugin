@@ -3,3 +3,8 @@
 # HTTP 客户端 / HTTP Client
 # 用于自定义时间 API 和节日 API 的网络请求
 aiohttp>=3.8.0
+
+# TOML 文件处理 / TOML File Processing
+# 用于读取和写入配置文件
+tomli>=2.0.0
+tomli-w>=1.2.0

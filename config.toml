@@ -19,6 +19,10 @@
 # [plugin] - 插件基础配置 / Basic Plugin Configuration
 # ============================================================
 [plugin]
+# 配置文件版本 / Config file version
+# 请勿手动修改此值 / Do not modify this value manually
+config_version = "1.1.0"
+
 # 是否启用插件 / Enable plugin
 enabled = true
 
@@ -108,19 +112,36 @@ schedule_generation = """你是一个生活规划助手，需要为机器人生�
 个人习惯：
 {habits}
 
-请生成今天的日程安排，格式为JSON数组，每个元素包含：
+请生成今天的完整日程安排（00:00-23:59），格式为JSON数组，每个元素包含：
 - time: 时间（HH:MM格式）
-- activity: 活动类型（work, leisure, meal, sleep, exercise, study, other）
+- activity: 活动类型（work, leisure, meal, sleep, exercise, study, other, rest, medical）
 - description: 活动描述（简短说明）
 - priority: 优先级（1-5，5最高）
 
+【重要】日程要求：
+1. 必须生成完整的一天的日程，从00:00到23:59，不要生成跨天的日程
+2. 所有活动的时间必须在今天（{current_date}）范围内
+3. 不要生成明天凌晨的活动（如00:00-06:00的活动应该安排在今天的晚上或不要安排）
+4. 必须包含早上起床（如07:00-09:00）、上午活动、午餐、下午活动、晚餐、晚上活动、睡觉等
+5. 不要从当前时间开始生成，要从00:00开始生成完整的一整天
+6. 日程要符合人格特点和个人习惯
+
 注意：
 1. 日程要符合人格特点和个人习惯
-2. 如果健康状态不佳，要减少工作和运动，增加休息
-3. 如果疲劳度高，要安排更多休息
-4. 节假日可以安排更多休闲活动
-5. 确保三餐时间合理
-6. 确保有足够的睡眠时间
+2. 生病系统调整（健康度越高越健康）/ Illness system adjustment (higher health is healthier):
+   - healthy (80-100): 正常日程，可安排工作、运动、娱乐 / Normal schedule, can arrange work, exercise, entertainment
+   - recovering (60-79): 减少工作强度，安排康复活动 / Reduce work intensity, arrange recovery activities
+   - slightly_ill (40-59): 减少工作，增加休息时间 / Reduce work, increase rest time
+   - ill (20-39): 主要安排休息、轻度活动 / Mainly rest and light activities
+   - seriously_ill (0-19): 只安排休息、医疗活动、必要的生活活动 / Only rest, medical activities, and essential life activities
+4. 如果疲劳度高（>70），要安排更多休息 / If fatigue is high (>70), arrange more rest
+5. 如果饥饿度高（>70），要优先安排用餐 / If hunger is high (>70), prioritize meals
+6. 节假日可以安排更多休闲活动 / Holidays can have more leisure activities
+7. 确保三餐时间合理 / Ensure reasonable meal times
+8. 确保有足够的睡眠时间 / Ensure sufficient sleep time
+9. 生病时可以安排医疗活动（medical）和休息活动（rest）/ When ill, can arrange medical activities and rest
+10. 日程应该包含8-15个活动，覆盖一整天 / Schedule should contain 8-15 activities covering the whole day
+11. 睡觉时间应该安排在晚上（如22:00-23:59），不要安排到明天凌晨 / Sleep time should be scheduled in the evening (e.g., 22:00-23:59), not tomorrow morning
 
 请只返回JSON数组，不要有其他内容。"""
 
@@ -153,9 +174,23 @@ random_event_generation = """你是一个生活事件生成器，需要根据当
 注意：
 1. 事件要符合当前情境
 2. 事件要符合人格特点
-3. 健康事件会影响健康状态
-4. 负面事件概率要低一些
-5. 事件描述要生动自然
+3. 健康事件会影响健康状态，生病会导致健康度下降
+4. 生病系统：当疲劳度高（>70）、饥饿度高（>70）、或情绪持续低落时，更容易产生生病事件
+5. 生病类型：轻微不适（-5到-10）、生病（-10到-20）、严重生病（-20到-30）
+6. 康复事件：当健康状态不佳时，可以生成康复事件（+5到+15）
+7. 负面事件概率要低一些（0.05-0.2）
+8. 事件描述要生动自然
+
+生病系统说明：
+- 健康度范围：0-100（越高越健康）/ Health range: 0-100 (higher is healthier)
+- 健康状态 / Health status:
+  * healthy (80-100): 健康 / Healthy
+  * recovering (60-79): 康复中 / Recovering
+  * slightly_ill (40-59): 轻微不适 / Slightly ill
+  * ill (20-39): 生病 / Ill
+  * seriously_ill (0-19): 严重生病 / Seriously ill
+- 生病后会重新生成符合病情的日程 / Schedule will be regenerated based on illness
+- 康复后会重新生成正常日程 / Schedule will be regenerated after recovery
 
 请只返回JSON对象，不要有其他内容。"""
 
@@ -193,24 +228,44 @@ emotion_judgment = """你是一个情绪分析助手，需要判断机器人的�
 
 # 习惯生成提示词 / Habit generation prompt
 # 支持的变量 / Supported variables: {personality} / Personality
-habit_generation = """你是一个习惯分析助手，需要根据人格特点生成个人习惯。
+habit_generation = """【重要】你必须严格返回JSON格式，不要包含任何其他文字、解释或代码块。
+
+你是一个习惯分析助手，需要根据人格特点生成个人习惯。
 
 人格特点：
 {personality}
 
-请生成个人习惯，格式为JSON对象，包含：
-- speaking_habits: 说话习惯列表（如"喜欢用表情"、"喜欢用语气词"等）
-- behavior_habits: 行为习惯列表（如"早起"、"爱运动"、"爱读书"等）
-- interests: 兴趣爱好列表（如"音乐"、"电影"、"游戏"、"旅行"等）
-- preferences: 偏好设置（字典，包含food, music, movie等）
+请生成个人习惯，严格按照以下JSON格式：
 
-注意：
-1. 习惯要符合人格特点
-2. 习惯要多样化
-3. 习惯要积极健康
-4. 说话习惯要自然
+```json
+{{
+  "speaking_habits": ["说话习惯1", "说话习惯2"],
+  "behavior_habits": ["行为习惯1", "行为习惯2"],
+  "interests": ["兴趣1", "兴趣2"],
+  "preferences": {{
+    "food": ["食物偏好"],
+    "music": ["音乐偏好"],
+    "movie": ["电影偏好"],
+    "books": ["书籍偏好"],
+    "colors": ["颜色偏好"],
+    "weather": ["天气偏好"],
+    "activities": ["活动偏好"]
+  }}
+}}
+```
 
-请只返回JSON对象，不要有其他内容。"""
+【极其重要的要求】：
+1. JSON字符串内部的内容中，绝对不能使用任何引号（包括中文引号" " ' '和英文引号" '）
+2. 如果习惯描述中需要引用某个词或短语，请使用括号或其他方式表达，不要使用引号
+3. 例如：不要写"喜欢用'嗯'、'那个'等语气词"，而应该写"喜欢用嗯、那个等语气词"
+4. 习惯要符合人格特点
+5. 习惯要多样化（每个列表至少3-5项）
+6. 习惯要积极健康
+7. 说话习惯要自然
+8. preferences 必须包含所有字段
+9. 所有字符串值都必须用英文双引号包裹
+
+【再次强调】只返回JSON对象，不要有其他内容，不要包含markdown代码块标记，直接返回纯JSON文本。"""
 
 # 社交网络分析提示词 / Social network analysis prompt
 # 支持的变量 / Supported variables: 同上 + {user_name}, {user_traits}, {relationship_type}, {intimacy}
@@ -270,50 +325,163 @@ intimacy_judgment = """你是一个亲密度判断助手，需要根据用户的
 
 只返回JSON，不要有其他内容。"""
 
+# 睡眠回复判断提示词 / Sleep reply judgment prompt
+# 支持的变量 / Supported variables:
+#   {sleep_state} - 当前睡眠状态 / Current sleep state
+#   {sleep_duration} - 已睡眠时长（分钟）/ Sleep duration (minutes)
+#   {message_count} - 睡眠期间收到的消息数量 / Message count during sleep
+#   {message_content} - 消息内容 / Message content
+#   {caller_name} - 发送者名称 / Caller name
+#   {relationship} - 与发送者的关系 / Relationship with caller
+#   {intimacy} - 与发送者的亲密度 / Intimacy with caller
+sleep_reply_judgment = """你是一个睡眠回复判断助手，需要判断机器人在睡眠期间是否应该回复消息，以及回复什么内容。
+
+当前情况：
+- 睡眠状态：{sleep_state}
+- 已睡眠时长：{sleep_duration}分钟
+- 睡眠期间收到的消息数量：{message_count}条
+- 发送者：{caller_name}
+- 关系：{relationship}
+- 亲密度：{intimacy}/100
+- 消息内容：{message_content}
+
+睡眠状态说明：
+- awake (清醒): 正常活动，可以回复
+- sleepy (困倦): 疲劳度较高，准备入睡，可以回复
+- falling_asleep (入睡中): 正在入睡，不回复
+- light_sleep (浅睡): 轻度睡眠，不回复，可能被重要消息吵醒
+- deep_sleep (深睡): 深度睡眠，不回复，难以被吵醒
+- waking_up (醒来中): 正在醒来，不回复
+
+请判断：
+1. 这次消息是否应该回复？（是/否）
+2. 如果应该回复，回复什么内容？（简短、友好）
+
+判断标准：
+- 深睡（deep_sleep）和醒来中（waking_up）不应该回复
+- 浅睡（light_sleep）和入睡中（falling_asleep）通常不回复
+- 重要消息（紧急、重要、救命等）可能需要回复
+- 关系亲密的用户（亲密度 > 60）可能需要回复
+- 消息太多时不应该回复
+- 回复内容应该简短、友好，表明正在睡觉
+- 回复概率建议：浅睡30%，入睡中10%，深睡0%
+
+请返回JSON格式：
+{
+  "should_reply": true/false,
+  "reply_content": "回复内容（如果should_reply为false，此字段为空字符串）",
+  "reason": "判断原因"
+}
+
+只返回JSON，不要有其他内容。"""
+
 # ============================================================
 # [habits] - 习惯配置 / Habits Configuration
 # ============================================================
 [habits]
 # 是否使用AI生成习惯 / Use AI to generate habits
-# true: 首次运行时AI自动生成 / true: AI generates on first run
-# false: 使用下面的手动配置 / false: Use manual configuration below
-use_ai_generation = true
+# true: 首次运行时AI自动生成，并保存到状态文件 / true: AI generates on first run, saves to state file
+# false: 不生成习惯，使用空习惯 / false: Do not generate habits, use empty habits
+use_ai_generation = false
 
-# 手动配置习惯（仅在 use_ai_generation = false 时生效）/ Manual habits (only when use_ai_generation = false)
-# 留空表示让AI生成 / Leave empty to let AI generate
+# 注意：习惯现在从状态文件读取，不从此配置文件读取
+# AI生成的习惯会自动保存到状态文件
+# 如果需要修改习惯，请编辑状态文件：data/state.json
+# Note: Habits are now loaded from state file, not this config file
+# AI-generated habits are automatically saved to state file
+# To modify habits, edit the state file: data/state.json
 
+# 以下配置项已废弃，仅作参考 / The following configurations are deprecated, for reference only
 # 说话习惯 / Speaking habits
 speaking_habits = [
-    "喜欢用表情",
-    "喜欢用语气词",
-    "喜欢用网络用语"
+    "喜欢使用温暖友好的语气",
+    "经常使用鼓励性的话语",
+    "善于倾听并给予积极回应",
+    "喜欢用'很高兴'、'太好了'等积极表达",
+    "说话清晰有条理",
+    "适度使用emoji表情增加亲和力",
+    "喜欢说'让我们一起'来增强互动感",
+    "习惯用'请问'、'谢谢'等礼貌用语",
 ]
 
 # 行为习惯 / Behavior habits
 behavior_habits = [
-    "早起",
-    "爱运动",
-    "爱读书"
+    "保持规律作息",
+    "喜欢学习新知识",
+    "乐于助人",
+    "善于整理和归纳信息",
+    "保持好奇心探索新事物",
+    "定期反思和总结",
+    "注重细节和准确性",
+    "积极主动沟通",
+    "保持耐心和包容心",
 ]
 
 # 兴趣爱好 / Interests
 interests = [
-    "音乐",
-    "电影",
-    "游戏",
-    "旅行"
+    "学习各领域知识",
+    "阅读书籍和文章",
+    "了解科技发展",
+    "语言学习",
+    "艺术欣赏",
+    "人文历史",
+    "心理学",
+    "创意写作",
+    "逻辑推理",
+    "文化交流",
 ]
 
 # 偏好设置 / Preferences
 [habits.preferences]
 # 食物偏好 / Food preference
-food = "甜食"
+food = [
+    "健康营养的食物",
+    "各国特色美食",
+    "水果",
+    "茶饮",
+]
 
 # 音乐偏好 / Music preference
-music = "流行音乐"
+music = [
+    "轻音乐",
+    "古典音乐",
+    "流行音乐",
+    "世界音乐",
+]
 
 # 电影偏好 / Movie preference
-movie = "科幻"
+movie = [
+    "励志片",
+    "科幻片",
+    "纪录片",
+    "动画片",
+    "温情片",
+]
+
+# 书籍偏好 / Books preference
+books = [
+    "科普读物",
+    "人文社科",
+    "小说",
+    "传记",
+    "心理学",
+]
+
+# 活动偏好 / Activities preference
+activities = [
+    "交流讨论",
+    "知识分享",
+    "创意活动",
+    "团队协作",
+]
+
+# 沟通风格偏好 / Communication style preference
+communication_style = [
+    "开放包容",
+    "真诚友善",
+    "积极乐观",
+    "耐心细致",
+]
 
 # ============================================================
 # [schedule] - 日程配置 / Schedule Configuration
@@ -330,6 +498,36 @@ regenerate_daily = true
 # 0.1 = 每小时10%概率 / 0.1 = 10% probability per hour
 # 1.0 = 每小时必定触发 / 1.0 = Always trigger per hour
 random_event_probability = 0.1
+
+# 是否启用生病系统 / Enable illness system
+# true: 启用生病系统，AI会根据多维度判断是否生病 / true: Enable illness system, AI judges illness based on multiple factors
+# false: 禁用生病系统 / false: Disable illness system
+illness_system_enabled = true
+
+# 生病概率倍数 / Illness probability multiplier
+# 范围: 0.0-2.0 / Range: 0.0-2.0
+# 0.5 = 降低生病概率 / 0.5 = Reduce illness probability
+# 1.0 = 正常概率 / 1.0 = Normal probability
+# 2.0 = 提高生病概率 / 2.0 = Increase illness probability
+illness_probability_multiplier = 1.0
+
+# 生病时是否自动重新生成日程 / Auto regenerate schedule on illness
+# true: 生病后自动重新生成符合病情的日程 / true: Auto regenerate schedule based on illness
+# false: 生病后不自动重新生成日程 / false: Do not auto regenerate schedule on illness
+auto_regenerate_on_illness = true
+
+# ============================================================
+# 健康状态说明 / Health Status Description
+# ============================================================
+# 健康度范围：0-100（越高越健康）/ Health range: 0-100 (higher is healthier)
+# healthy (80-100): 健康 / Healthy
+# recovering (60-79): 康复中 / Recovering
+# slightly_ill (40-59): 轻微不适 / Slightly ill
+# ill (20-39): 生病 / Ill
+# seriously_ill (0-19): 严重生病 / Seriously ill
+# 
+# 生病事件会降低健康度 / Illness events reduce health
+# 康复事件会提高健康度 / Recovery events increase health
 
 # ============================================================
 # [time_api] - 时间日期API配置 / Time and Date API Configuration
@@ -406,6 +604,96 @@ auto_save_interval = 300
 # 1.0 = 每次都更新 / 1.0 = Update every time
 # 建议: 0.3-0.8 / Recommended: 0.3-0.8
 message_state_update_probability = 0.7
+
+# ============================================================
+# [sleep] - 睡眠系统配置 / Sleep System Configuration
+# ============================================================
+[sleep]
+# 是否启用睡眠系统 / Enable sleep system
+enabled = true
+
+# 最短睡眠时间（小时）/ Minimum sleep duration (hours)
+# 防止睡眠过短 / Prevent sleeping too short
+# 建议: 4-6小时 / Recommended: 4-6 hours
+min_sleep_hours = 4
+
+# 最长睡眠时间（小时）/ Maximum sleep duration (hours)
+# 防止睡眠过长 / Prevent sleeping too long
+# 建议: 8-12小时 / Recommended: 8-12 hours
+max_sleep_hours = 10
+
+# 是否允许手动唤醒 / Allow manual wake-up
+allow_manual_wake = true
+
+# AI自动回复配置 / AI auto-reply configuration
+# 是否启用AI判断自动回复 / Enable AI judgment for auto-reply
+ai_reply_enabled = true
+
+# AI模型 / AI model
+# 留空使用 replyer 模型 / Leave empty to use replyer model
+ai_model = "replyer"
+
+# AI回复概率 / AI reply probability
+# AI判断应该回复后，实际回复的概率
+# 范围: 0.0-1.0 / Range: 0.0-1.0
+# 建议: 0.2-0.5 / Recommended: 0.2-0.5
+ai_reply_probability = 0.3
+
+# 打扰唤醒配置 / Disturbance wake-up configuration
+# 是否启用打扰唤醒 / Enable disturbance wake-up
+disturbance_enabled = true
+
+# 浅睡唤醒概率 / Light sleep wake-up probability
+# 浅睡时被消息吵醒的概率 / Probability of being woken by messages during light sleep
+# 范围: 0.0-1.0 / Range: 0.0-1.0
+# 建议: 0.3-0.7 / Recommended: 0.3-0.7
+light_sleep_wake_prob = 0.5
+
+# 深睡唤醒概率 / Deep sleep wake-up probability
+# 深睡时被消息吵醒的概率 / Probability of being woken by messages during deep sleep
+# 范围: 0.0-1.0 / Range: 0.0-1.0
+# 建议: 0.05-0.2 / Recommended: 0.05-0.2
+deep_sleep_wake_prob = 0.1
+
+# 消息频率阈值 / Message frequency threshold
+# 每分钟超过此数量的消息可能被吵醒 / Messages per minute threshold for possible wake-up
+# 建议: 2-5 / Recommended: 2-5
+message_freq_threshold = 3
+
+# 亲密度唤醒阈值 / Intimacy wake-up threshold
+# 关系亲密的用户（亲密度 > 阈值）可能唤醒 / Users with intimacy above threshold may wake up
+# 范围: 0-100 / Range: 0-100
+# 建议: 50-80 / Recommended: 50-80
+intimacy_wake_threshold = 60
+
+# 默认自动回复 / Default auto-reply
+# AI不回复时使用的默认消息 / Default message when AI doesn't reply
+# 留空则不回复 / Leave empty to not reply
+sleep_reply = "我现在在睡觉，明天再聊~"
+
+# ============================================================
+# 睡眠状态说明 / Sleep State Description
+# ============================================================
+# 睡眠状态 / Sleep states:
+# - awake (清醒): 正常活动，可以回复消息 / Normal activity, can reply
+# - sleepy (困倦): 疲劳度较高，准备入睡 / High fatigue, preparing to sleep
+# - falling_asleep (入睡中): 正在入睡，不回复 / Falling asleep, no reply
+# - light_sleep (浅睡): 轻度睡眠，不回复，可能被吵醒 / Light sleep, no reply, may be woken
+# - deep_sleep (深睡): 深度睡眠，不回复，难以被吵醒 / Deep sleep, no reply, hard to wake
+# - waking_up (醒来中): 正在醒来，不回复 / Waking up, no reply
+#
+# 日程联动 / Schedule integration:
+# - 当前日程为睡眠活动时自动入睡 / Automatically sleep when current activity is sleep
+# - 日程切换时自动醒来 / Automatically wake up when schedule changes
+#
+# AI自动回复 / AI auto-reply:
+# - AI根据睡眠状态、消息内容、关系亲密度判断是否回复
+# - AI judges whether to reply based on sleep state, message content, and relationship
+#
+# 打扰唤醒 / Disturbance wake-up:
+# - 浅睡时可能被大量消息、重要消息、紧急关键词吵醒
+# - Light sleep may be woken by frequent messages, important messages, or urgent keywords
+# - 深睡时很难被吵醒 / Deep sleep is hard to wake
 
 # ============================================================
 # [social_network] - 社交网络配置 / Social Network Configuration

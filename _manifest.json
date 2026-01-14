@@ -3,7 +3,7 @@
   "id": "maibot.life_simulation_plugin",
   "name": "Life Simulation Plugin (AI-Driven)",
   "name_zh-CN": "事件及人体模拟插件（AI驱动）",
-  "version": "1.5.0",
+  "version": "1.6.0",
   "description": "AI-driven life simulation: schedule, events, habits, holidays, and emotion judgment for human-like behavior",
   "description_zh-CN": "AI驱动的生活模拟：日程、事件、习惯、节日和情绪判断，实现拟人化行为",
   "author": {
@@ -66,6 +66,16 @@
         "description": "Process message events"
       },
       {
+        "type": "event_handler",
+        "name": "life_simulation_social_network",
+        "description": "Process social network interactions and update intimacy"
+      },
+      {
+        "type": "event_handler",
+        "name": "life_simulation_sleep",
+        "description": "Handle sleep state and block messages during sleep"
+      },
+      {
         "type": "action",
         "name": "perform_activity",
         "description": "Perform scheduled activity (AI-driven)"
@@ -91,6 +101,16 @@
         "description": "Set user relationship type (stranger, acquaintance, friend, close_friend, best_friend, family, partner, enemy, blocked)"
       },
       {
+        "type": "tool",
+        "name": "get_life_simulation_schedule",
+        "description": "Get schedule information, including current activity and all scheduled activities"
+      },
+      {
+        "type": "tool",
+        "name": "get_life_simulation_status",
+        "description": "Get current status including physiological states, current activity, and holiday information"
+      },
+      {
         "type": "command",
         "name": "life_status",
         "description": "Query current status",
@@ -101,6 +121,12 @@
         "name": "life_schedule",
         "description": "Query AI-generated schedule",
         "pattern": "/life_schedule"
+      },
+      {
+        "type": "command",
+        "name": "life_social",
+        "description": "Query social network information",
+        "pattern": "/life_social [list|detail] [user_id]"
       }
     ],
     "features": [
@@ -123,7 +149,13 @@
       "Social network system for managing user relationships",
       "Intimacy system with growth and decay mechanisms",
       "AI-driven intimacy judgment based on interaction content",
-      "Tool component for LLM to set user relationship type (including enemy and blocked)"
+      "Tool component for LLM to set user relationship type (including enemy and blocked)",
+      "Tool component for LLM to get schedule information and current activity",
+      "Tool component for LLM to get current status information (fatigue, hunger, health, emotion, sleep state etc.)",
+      "Complete sleep system with 6 sleep states and automatic transitions",
+      "Sleep-schedule integration: automatically enters/wakes up based on schedule activities",
+      "AI-driven auto-reply during sleep: intelligently judges whether to reply",
+      "Disturbance wake-up: can be woken by frequent messages, important senders, or urgent keywords"
     ],
     "configuration": {
       "auto_generate_config": true,
@@ -131,6 +163,30 @@
     }
   },
   "changelog": {
+    "1.6.0": [
+      "Fixed tool parameter format for GetSocialNetworkTool and SetRelationshipTool",
+      "Changed parameters from dictionary format to tuple format to comply with BaseTool requirements",
+      "Tools now properly pass parameter validation and can be called by LLM",
+      "Registered SocialNetworkEventHandler for automatic social network interaction tracking",
+      "Registered SocialNetworkCommand for manual social network queries (/life_social)",
+      "Registered MessageSleepEventHandler for sleep state management and message blocking",
+      "Updated _manifest.json to include all 16 components (6 event handlers, 2 actions, 5 tools, 3 commands)",
+      "Social network system now fully functional with automatic interaction recording",
+      "Plugin now fully compliant with MaiBot standard plugin format",
+      "Implemented complete sleep system with 6 sleep states (awake, sleepy, falling_asleep, light_sleep, deep_sleep, waking_up)",
+      "Sleep state automatically transitions based on time and conditions",
+      "Sleep system integrates with schedule: automatically enters sleep when current activity is sleep type",
+      "Sleep system integrates with schedule: automatically wakes up when activity changes from sleep",
+      "AI-driven auto-reply during sleep: AI judges whether to reply and what to say based on sleep state, message content, and relationship",
+      "Disturbance wake-up mechanism: can be woken up by frequent messages, important messages, or urgent keywords",
+      "Light sleep has higher wake-up probability, deep sleep has lower wake-up probability",
+      "Fatigue gradually recovers during sleep (0.5-1 per minute)",
+      "Health gradually recovers during sleep (0.1-0.2 per minute)",
+      "Configurable sleep duration limits (minimum 4 hours, maximum 10 hours)",
+      "Configurable auto-reply message during sleep",
+      "Supports manual wake-up functionality",
+      "Added sleep_reply_judgment AI prompt for judging whether to reply during sleep"
+    ],
     "1.5.0": [
       "Added SetRelationshipTool for LLM to set user relationship type",
       "AI can now set users as enemy or blocked",

@@ -181,6 +181,7 @@ class LifeState:
         self.behavior_habits: List[str] = []
         self.interests: List[str] = []
         self.preferences: Dict[str, str] = {}
+        self.personality_hash: str = ""  # 人格哈希值，用于判断是否需要重新生成习惯
 
         # Holidays / 节日
         self.current_holiday: str = ""
@@ -217,6 +218,7 @@ class LifeState:
             "behavior_habits": self.behavior_habits,
             "interests": self.interests,
             "preferences": self.preferences,
+            "personality_hash": self.personality_hash,
             "current_holiday": self.current_holiday,
             "is_holiday": self.is_holiday,
             "social_network_enabled": self.social_network_enabled,
@@ -248,6 +250,7 @@ class LifeState:
             self.behavior_habits = data.get("behavior_habits", [])
             self.interests = data.get("interests", [])
             self.preferences = data.get("preferences", {})
+            self.personality_hash = data.get("personality_hash", "")
             self.current_holiday = data.get("current_holiday", "")
             self.is_holiday = data.get("is_holiday", False)
             self.social_network_enabled = data.get("social_network_enabled", True)
@@ -400,7 +403,37 @@ class SocialNetwork:
 
             # Parse response / 解析响应
             try:
-                result = json.loads(response)
+                # 移除 markdown 代码块标记 / Remove markdown code block markers
+                cleaned_response = response.strip()
+                if cleaned_response.startswith("```json"):
+                    cleaned_response = cleaned_response[7:]
+                elif cleaned_response.startswith("```"):
+                    cleaned_response = cleaned_response[3:]
+                if cleaned_response.endswith("```"):
+                    cleaned_response = cleaned_response[:-3]
+                cleaned_response = cleaned_response.strip()
+
+                # 替换中文引号为英文引号，避免 JSON 解析错误
+                cleaned_response = cleaned_response.replace('"', '"').replace('"', '"')
+                cleaned_response = cleaned_response.replace(''', "'").replace(''', "'")
+
+                # 尝试解析 JSON
+                try:
+                    result = json.loads(cleaned_response)
+                except json.JSONDecodeError as e:
+                    logger.error(f"Failed to parse JSON after cleaning: {e}")
+                    logger.error(f"Cleaned response (first 1000 chars): {cleaned_response[:1000] if cleaned_response else 'empty'}")
+                    logger.error(f"Original response (first 1000 chars): {response[:1000] if response else 'empty'}")
+                    # 尝试修复常见的 JSON 错误
+                    try:
+                        # 尝试移除可能的尾随逗号
+                        cleaned_response = cleaned_response.replace(',\n}', '\n}').replace(',\n]', '\n]')
+                        cleaned_response = cleaned_response.replace(', }', '}').replace(', ]', ']')
+                        result = json.loads(cleaned_response)
+                        logger.info("Successfully parsed JSON after fixing trailing commas")
+                    except json.JSONDecodeError as e2:
+                        logger.error(f"Failed to parse JSON even after fixing commas: {e2}")
+                        return 0
                 should_increase = result.get("should_increase", False)
                 increase_amount = result.get("increase_amount", 0)
 
@@ -658,11 +691,13 @@ class LifeSimulationPlugin(BasePlugin):
         "social_network": "社交网络配置 / Social Network Configuration",
         "commands": "命令配置 / Commands Configuration",
         "state": "状态配置 / State Configuration",
+        "sleep": "睡眠系统配置 / Sleep System Configuration",
         "logging": "日志配置 / Logging Configuration",
     }
 
     config_schema: dict = {
         "plugin": {
+            "config_version": ConfigField(type=str, default="1.1.0", description="配置文件版本 / Config file version"),
             "enabled": ConfigField(type=bool, default=True, description="启用插件 / Enable plugin"),
             "update_interval": ConfigField(type=int, default=60, description="状态更新间隔（秒）/ State update interval (seconds)"),
             "data_dir": ConfigField(type=str, default="data", description="数据目录 / Data directory"),
@@ -703,9 +738,6 @@ class LifeSimulationPlugin(BasePlugin):
         },
         "habits": {
             "use_ai_generation": ConfigField(type=bool, default=True, description="使用AI生成习惯 / Use AI to generate habits"),
-            "speaking_habits": ConfigField(type=list, default=[], description="说话习惯 / Speaking habits"),
-            "behavior_habits": ConfigField(type=list, default=[], description="行为习惯 / Behavior habits"),
-            "interests": ConfigField(type=list, default=[], description="兴趣爱好 / Interests"),
         },
         "schedule": {
             "regenerate_daily": ConfigField(type=bool, default=True, description="每天重新生成日程 / Regenerate schedule daily"),
@@ -760,6 +792,21 @@ class LifeSimulationPlugin(BasePlugin):
             "level": ConfigField(type=str, default="INFO", description="日志级别 / Log level"),
             "verbose": ConfigField(type=bool, default=False, description="详细日志 / Verbose logging"),
         },
+        "sleep": {
+            "enabled": ConfigField(type=bool, default=True, description="启用睡眠系统 / Enable sleep system"),
+            "min_sleep_hours": ConfigField(type=int, default=4, description="最短睡眠时间（小时）/ Minimum sleep duration (hours)"),
+            "max_sleep_hours": ConfigField(type=int, default=10, description="最长睡眠时间（小时）/ Maximum sleep duration (hours)"),
+            "allow_manual_wake": ConfigField(type=bool, default=True, description="是否允许手动唤醒 / Allow manual wake-up"),
+            "ai_reply_enabled": ConfigField(type=bool, default=True, description="启用AI判断自动回复 / Enable AI judgment for auto-reply"),
+            "ai_model": ConfigField(type=str, default="replyer", description="AI模型 / AI model"),
+            "ai_reply_probability": ConfigField(type=float, default=0.3, description="AI回复概率 / AI reply probability"),
+            "disturbance_enabled": ConfigField(type=bool, default=True, description="启用打扰唤醒 / Enable disturbance wake-up"),
+            "light_sleep_wake_prob": ConfigField(type=float, default=0.5, description="浅睡唤醒概率 / Light sleep wake-up probability"),
+            "deep_sleep_wake_prob": ConfigField(type=float, default=0.1, description="深睡唤醒概率 / Deep sleep wake-up probability"),
+            "message_freq_threshold": ConfigField(type=int, default=3, description="消息频率阈值 / Message frequency threshold"),
+            "intimacy_wake_threshold": ConfigField(type=int, default=60, description="亲密度唤醒阈值 / Intimacy wake-up threshold"),
+            "sleep_reply": ConfigField(type=str, default="我现在在睡觉，明天再聊~", description="默认自动回复 / Default auto-reply"),
+        },
     }
 
     def _ensure_config_with_prompts(self):
@@ -792,27 +839,24 @@ class LifeSimulationPlugin(BasePlugin):
 
     def _write_default_config_with_prompts(self, config_file: Path, existing_config: Optional[Dict] = None):
         """写入包含默认提示词的配置文件 / Write config file with default prompts"""
-        default_config_content = self._get_default_config_content()
-
-        # Merge with existing config if provided / 如果提供了现有配置，则合并
+        # Only write default config if prompts are empty or missing
+        # 只在提示词为空或不存在时才写入默认配置
         if existing_config:
-            try:
-                import tomli
-                default_config = tomli.loads(default_config_content)
-                # Merge: use existing values, but ensure prompts are from default
-                # 合并：使用现有值，但确保提示词来自默认配置
-                for section in default_config:
-                    if section == "prompts":
-                        # Always use default prompts / 总是使用默认提示词
-                        existing_config[section] = default_config[section]
-                    elif section not in existing_config:
-                        existing_config[section] = default_config[section]
+            prompts_section = existing_config.get("prompts", {})
+            has_empty_prompts = any(
+                not prompts_section.get(key, "").strip()
+                for key in ["schedule_generation", "random_event_generation", "emotion_judgment", "habit_generation"]
+            )
 
-                # Convert back to TOML / 转换回 TOML
-                import tomli_w
-                default_config_content = tomli_w.dumps(existing_config)
-            except Exception as e:
-                logger.warning(f"Failed to merge config: {e}")
+            if not has_empty_prompts:
+                # All prompts exist and are not empty, don't overwrite
+                # 所有提示词都存在且不为空，不覆盖
+                logger.info(f"Config file already has valid prompts, skipping: {config_file}")
+                return
+
+            logger.info(f"Config file has empty prompts, writing default config: {config_file}")
+
+        default_config_content = self._get_default_config_content()
 
         # Write config file / 写入配置文件
         try:
@@ -845,6 +889,10 @@ class LifeSimulationPlugin(BasePlugin):
 # [plugin] - 插件基础配置 / Basic Plugin Configuration
 # ============================================================
 [plugin]
+# 配置文件版本 / Config file version
+# 请勿手动修改此值 / Do not modify this value manually
+config_version = "1.1.0"
+
 # 是否启用插件 / Enable plugin
 enabled = true
 
@@ -934,11 +982,19 @@ schedule_generation = """你是一个生活规划助手，需要为机器人生�
 个人习惯：
 {habits}
 
-请生成今天的日程安排，格式为JSON数组，每个元素包含：
+请生成今天的完整日程安排（00:00-23:59），格式为JSON数组，每个元素包含：
 - time: 时间（HH:MM格式）
 - activity: 活动类型（work, leisure, meal, sleep, exercise, study, other, rest, medical）
 - description: 活动描述（简短说明）
 - priority: 优先级（1-5，5最高）
+
+【重要】日程要求：
+1. 必须生成完整的一天的日程，从00:00到23:59，不要生成跨天的日程
+2. 所有活动的时间必须在今天（{current_date}）范围内
+3. 不要生成明天凌晨的活动（如00:00-06:00的活动应该安排在今天的晚上或不要安排）
+4. 必须包含早上起床（如07:00-09:00）、上午活动、午餐、下午活动、晚餐、晚上活动、睡觉等
+5. 不要从当前时间开始生成，要从00:00开始生成完整的一整天
+6. 日程要符合人格特点和个人习惯
 
 注意：
 1. 日程要符合人格特点和个人习惯
@@ -948,12 +1004,14 @@ schedule_generation = """你是一个生活规划助手，需要为机器人生�
    - slightly_ill (40-59): 减少工作，增加休息时间 / Reduce work, increase rest time
    - ill (20-39): 主要安排休息、轻度活动 / Mainly rest and light activities
    - seriously_ill (0-19): 只安排休息、医疗活动、必要的生活活动 / Only rest, medical activities, and essential life activities
-3. 如果疲劳度高（>70），要安排更多休息 / If fatigue is high (>70), arrange more rest
-4. 如果饥饿度高（>70），要优先安排用餐 / If hunger is high (>70), prioritize meals
-5. 节假日可以安排更多休闲活动 / Holidays can have more leisure activities
-6. 确保三餐时间合理 / Ensure reasonable meal times
-7. 确保有足够的睡眠时间 / Ensure sufficient sleep time
-8. 生病时可以安排医疗活动（medical）和休息活动（rest）/ When ill, can arrange medical activities and rest
+4. 如果疲劳度高（>70），要安排更多休息 / If fatigue is high (>70), arrange more rest
+5. 如果饥饿度高（>70），要优先安排用餐 / If hunger is high (>70), prioritize meals
+6. 节假日可以安排更多休闲活动 / Holidays can have more leisure activities
+7. 确保三餐时间合理 / Ensure reasonable meal times
+8. 确保有足够的睡眠时间 / Ensure sufficient sleep time
+9. 生病时可以安排医疗活动（medical）和休息活动（rest）/ When ill, can arrange medical activities and rest
+10. 日程应该包含8-15个活动，覆盖一整天 / Schedule should contain 8-15 activities covering the whole day
+11. 睡觉时间应该安排在晚上（如22:00-23:59），不要安排到明天凌晨 / Sleep time should be scheduled in the evening (e.g., 22:00-23:59), not tomorrow morning
 
 请只返回JSON数组，不要有其他内容。"""
 
@@ -1064,45 +1122,16 @@ habit_generation = """你是一个习惯分析助手，需要根据人格特点�
 # ============================================================
 [habits]
 # 是否使用AI生成习惯 / Use AI to generate habits
-# true: 首次运行时AI自动生成 / true: AI generates on first run
-# false: 使用下面的手动配置 / false: Use manual configuration below
+# true: 首次运行时AI自动生成，并保存到状态文件 / true: AI generates on first run, saves to state file
+# false: 不生成习惯，使用空习惯 / false: Do not generate habits, use empty habits
 use_ai_generation = true
 
-# 手动配置习惯（仅在 use_ai_generation = false 时生效）/ Manual habits (only when use_ai_generation = false)
-# 留空表示让AI生成 / Leave empty to let AI generate
-
-# 说话习惯 / Speaking habits
-speaking_habits = [
-    "喜欢用表情",
-    "喜欢用语气词",
-    "喜欢用网络用语"
-]
-
-# 行为习惯 / Behavior habits
-behavior_habits = [
-    "早起",
-    "爱运动",
-    "爱读书"
-]
-
-# 兴趣爱好 / Interests
-interests = [
-    "音乐",
-    "电影",
-    "游戏",
-    "旅行"
-]
-
-# 偏好设置 / Preferences
-[habits.preferences]
-# 食物偏好 / Food preference
-food = "甜食"
-
-# 音乐偏好 / Music preference
-music = "流行音乐"
-
-# 电影偏好 / Movie preference
-movie = "科幻"
+# 注意：习惯现在从状态文件读取，不从此配置文件读取
+# AI生成的习惯会自动保存到状态文件
+# 如果需要修改习惯，请编辑状态文件：data/state.json
+# Note: Habits are now loaded from state file, not this config file
+# AI-generated habits are automatically saved to state file
+# To modify habits, edit the state file: data/state.json
 
 # ============================================================
 # [schedule] - 日程配置 / Schedule Configuration
@@ -1277,7 +1306,9 @@ verbose = false
             (StartupHandler.get_handler_info(), StartupHandler),
             (StopHandler.get_handler_info(), StopHandler),
             (StateUpdateHandler.get_handler_info(), StateUpdateHandler),
+            (MessageSleepEventHandler.get_handler_info(), MessageSleepEventHandler),
             (MessageEventHandler.get_handler_info(), MessageEventHandler),
+            (SocialNetworkEventHandler.get_handler_info(), SocialNetworkEventHandler),
 
             # Actions / 动作
             (PerformActivityAction.get_action_info(), PerformActivityAction),
@@ -1287,12 +1318,15 @@ verbose = false
             (GetHabitsTool.get_tool_info(), GetHabitsTool),
             (GetSocialNetworkTool.get_tool_info(), GetSocialNetworkTool),
             (SetRelationshipTool.get_tool_info(), SetRelationshipTool),
+            (GetScheduleTool.get_tool_info(), GetScheduleTool),
+            (GetStatusTool.get_tool_info(), GetStatusTool),
         ]
 
         # Commands / 命令
         if self.get_config("commands.enabled", True):
             components.append((StatusCommand.get_command_info(), StatusCommand))
             components.append((ScheduleCommand.get_command_info(), ScheduleCommand))
+            components.append((SocialNetworkCommand.get_command_info(), SocialNetworkCommand))
 
         return components
 
@@ -1375,6 +1409,17 @@ verbose = false
         # Generate habits if not set / 如果习惯未设置，则生成
         await self._ensure_habits()
 
+        # Generate schedule if needed / 如果需要，生成日程
+        regenerate_daily = self.get_config("schedule.regenerate_daily", True)
+        if regenerate_daily:
+            now = await self._time_api.get_current_time()
+            date_str = now.strftime("%Y-%m-%d")
+            if self._state.schedule_generated_date != date_str:
+                await self._generate_schedule()
+            elif not self._state.schedule:
+                # 如果没有日程，立即生成 / If no schedule, generate immediately
+                await self._generate_schedule()
+
     async def stop_scheduler(self):
         """停止调度器 / Stop scheduler"""
         if not self._scheduler_task or self._scheduler_task.done():
@@ -1436,10 +1481,17 @@ verbose = false
         # 从配置文件获取提示词 / Get prompt from config file
         prompt = self.get_config(f"prompts.{prompt_type}", "")
         if prompt:
-            return prompt.format(**kwargs)
-
-        logger.warning(f"Prompt not found: {prompt_type}")
-        return ""
+            logger.debug(f"Prompt type: {prompt_type}, kwargs keys: {list(kwargs.keys())}")
+            try:
+                formatted_prompt = prompt.format(**kwargs)
+                logger.debug(f"Prompt formatted successfully (length: {len(formatted_prompt)})")
+                return formatted_prompt
+            except KeyError as e:
+                logger.warning(f"Failed to format prompt {prompt_type}, missing key: {e}")
+                return prompt
+        else:
+            logger.warning(f"Prompt not found: {prompt_type}")
+            return ""
 
     def _get_model_config(self, model_name: str) -> Any:
         """获取模型配置 / Get model config"""
@@ -1516,12 +1568,71 @@ verbose = false
 
             # Parse response / 解析响应
             try:
-                schedule = json.loads(response)
+                # 移除 markdown 代码块标记 / Remove markdown code block markers
+                cleaned_response = response.strip()
+                if cleaned_response.startswith("```json"):
+                    cleaned_response = cleaned_response[7:]
+                elif cleaned_response.startswith("```"):
+                    cleaned_response = cleaned_response[3:]
+                if cleaned_response.endswith("```"):
+                    cleaned_response = cleaned_response[:-3]
+                cleaned_response = cleaned_response.strip()
+
+                # 替换中文引号为英文引号，避免 JSON 解析错误
+                cleaned_response = cleaned_response.replace('"', '"').replace('"', '"')
+                cleaned_response = cleaned_response.replace(''', "'").replace(''', "'")
+
+                # 尝试解析 JSON
+                try:
+                    schedule = json.loads(cleaned_response)
+                except json.JSONDecodeError as e:
+                    logger.error(f"Failed to parse schedule JSON after cleaning: {e}")
+                    logger.error(f"Cleaned response (first 1000 chars): {cleaned_response[:1000] if cleaned_response else 'empty'}")
+                    logger.error(f"Original response (first 1000 chars): {response[:1000] if response else 'empty'}")
+                    # 尝试修复常见的 JSON 错误
+                    try:
+                        cleaned_response = cleaned_response.replace(',\n}', '\n}').replace(',\n]', '\n]')
+                        cleaned_response = cleaned_response.replace(', }', '}').replace(', ]', ']')
+                        schedule = json.loads(cleaned_response)
+                        logger.info("Successfully parsed schedule JSON after fixing trailing commas")
+                    except json.JSONDecodeError as e2:
+                        logger.error(f"Failed to parse schedule JSON even after fixing commas: {e2}")
+                        return []
                 if isinstance(schedule, list):
                     async with self._state_lock:
                         self._state.schedule = schedule
                         self._state.schedule_generated_date = date_str
                     logger.info(f"Generated schedule for {date_str}: {len(schedule)} activities")
+
+                    # 校验当前时间，设置当前活动 / Check current time and set current activity
+                    try:
+                        current_time = await self._time_api.get_current_time()
+                        current_hour = current_time.hour
+                        current_minute = current_time.minute
+                        current_time_minutes = current_hour * 60 + current_minute
+
+                        # 查找当前时间对应的活动 / Find activity for current time
+                        for activity in schedule:
+                            activity_time = activity.get("time", "")
+                            if ":" in activity_time:
+                                try:
+                                    hour, minute = map(int, activity_time.split(":"))
+                                    activity_time_minutes = hour * 60 + minute
+
+                                    # 如果当前时间在活动时间前后5分钟内，设置当前活动
+                                    # If current time is within 5 minutes of activity time, set current activity
+                                    if abs(current_time_minutes - activity_time_minutes) <= 5:
+                                        async with self._state_lock:
+                                            self._state.current_activity = activity.get("activity_type", "idle")
+                                            self._state.current_activity_description = activity.get("description", "")
+                                            self._state.last_activity_time = time.time()
+                                        logger.info(f"Set current activity based on schedule: {self._state.current_activity} at {activity_time}")
+                                        break
+                                except (ValueError, IndexError) as e:
+                                    logger.warning(f"Failed to parse activity time {activity_time}: {e}")
+                    except Exception as e:
+                        logger.warning(f"Failed to check current time for schedule: {e}")
+
                     return schedule
             except json.JSONDecodeError:
                 logger.error(f"Failed to parse schedule JSON: {response}")
@@ -1582,7 +1693,36 @@ verbose = false
 
             # Parse response / 解析响应
             try:
-                event = json.loads(response)
+                # 移除 markdown 代码块标记 / Remove markdown code block markers
+                cleaned_response = response.strip()
+                if cleaned_response.startswith("```json"):
+                    cleaned_response = cleaned_response[7:]
+                elif cleaned_response.startswith("```"):
+                    cleaned_response = cleaned_response[3:]
+                if cleaned_response.endswith("```"):
+                    cleaned_response = cleaned_response[:-3]
+                cleaned_response = cleaned_response.strip()
+
+                # 替换中文引号为英文引号，避免 JSON 解析错误
+                cleaned_response = cleaned_response.replace('"', '"').replace('"', '"')
+                cleaned_response = cleaned_response.replace(''', "'").replace(''', "'")
+
+                # 尝试解析 JSON
+                try:
+                    event = json.loads(cleaned_response)
+                except json.JSONDecodeError as e:
+                    logger.error(f"Failed to parse event JSON after cleaning: {e}")
+                    logger.error(f"Cleaned response (first 1000 chars): {cleaned_response[:1000] if cleaned_response else 'empty'}")
+                    logger.error(f"Original response (first 1000 chars): {response[:1000] if response else 'empty'}")
+                    # 尝试修复常见的 JSON 错误
+                    try:
+                        cleaned_response = cleaned_response.replace(',\n}', '\n}').replace(',\n]', '\n]')
+                        cleaned_response = cleaned_response.replace(', }', '}').replace(', ]', ']')
+                        event = json.loads(cleaned_response)
+                        logger.info("Successfully parsed event JSON after fixing trailing commas")
+                    except json.JSONDecodeError as e2:
+                        logger.error(f"Failed to parse event JSON even after fixing commas: {e2}")
+                        return None
                 if isinstance(event, dict):
                     # Check probability / 检查概率
                     probability = event.get("probability", 0.0)
@@ -1646,7 +1786,36 @@ verbose = false
 
             # Parse response / 解析响应
             try:
-                emotion_data = json.loads(response)
+                # 移除 markdown 代码块标记 / Remove markdown code block markers
+                cleaned_response = response.strip()
+                if cleaned_response.startswith("```json"):
+                    cleaned_response = cleaned_response[7:]
+                elif cleaned_response.startswith("```"):
+                    cleaned_response = cleaned_response[3:]
+                if cleaned_response.endswith("```"):
+                    cleaned_response = cleaned_response[:-3]
+                cleaned_response = cleaned_response.strip()
+
+                # 替换中文引号为英文引号，避免 JSON 解析错误
+                cleaned_response = cleaned_response.replace('"', '"').replace('"', '"')
+                cleaned_response = cleaned_response.replace(''', "'").replace(''', "'")
+
+                # 尝试解析 JSON
+                try:
+                    emotion_data = json.loads(cleaned_response)
+                except json.JSONDecodeError as e:
+                    logger.error(f"Failed to parse emotion JSON after cleaning: {e}")
+                    logger.error(f"Cleaned response (first 1000 chars): {cleaned_response[:1000] if cleaned_response else 'empty'}")
+                    logger.error(f"Original response (first 1000 chars): {response[:1000] if response else 'empty'}")
+                    # 尝试修复常见的 JSON 错误
+                    try:
+                        cleaned_response = cleaned_response.replace(',\n}', '\n}').replace(',\n]', '\n]')
+                        cleaned_response = cleaned_response.replace(', }', '}').replace(', ]', ']')
+                        emotion_data = json.loads(cleaned_response)
+                        logger.info("Successfully parsed emotion JSON after fixing trailing commas")
+                    except json.JSONDecodeError as e2:
+                        logger.error(f"Failed to parse emotion JSON even after fixing commas: {e2}")
+                        return "calm", 0, ""
                 if isinstance(emotion_data, dict):
                     emotion = emotion_data.get("emotion", "calm")
                     intensity = emotion_data.get("intensity", 0)
@@ -1671,6 +1840,20 @@ verbose = false
         try:
             # Get personality / 获取人格
             personality = self._get_personality()
+
+            # 计算人格哈希值 / Calculate personality hash
+            import hashlib
+            personality_hash = hashlib.md5(personality.encode('utf-8')).hexdigest()
+
+            logger.debug(f"Checking personality hash - stored: {self._state.personality_hash}, current: {personality_hash}")
+
+            # 检查人格是否变更 / Check if personality has changed
+            if self._state.personality_hash and self._state.personality_hash == personality_hash:
+                # 人格未变更，且已有习惯，不需要重新生成
+                if (self._state.speaking_habits or self._state.behavior_habits or
+                    self._state.interests or self._state.preferences):
+                    logger.info("Personality unchanged, skipping habit generation")
+                    return True
 
             # Build prompt / 构建提示词
             prompt = self._get_prompt("habit_generation", personality=personality)
@@ -1698,18 +1881,130 @@ verbose = false
 
             # Parse response / 解析响应
             try:
-                habits_data = json.loads(response)
+                # 移除 markdown 代码块标记 / Remove markdown code block markers
+                cleaned_response = response.strip()
+
+                # 处理各种可能的代码块格式
+                if cleaned_response.startswith("```json"):
+                    cleaned_response = cleaned_response[7:]
+                elif cleaned_response.startswith("```"):
+                    cleaned_response = cleaned_response[3:]
+                
+                # 移除结尾的代码块标记
+                if cleaned_response.endswith("```"):
+                    cleaned_response = cleaned_response[:-3]
+                
+                cleaned_response = cleaned_response.strip()
+
+                # 替换中文引号为英文引号，避免 JSON 解析错误
+                # 使用正则表达式更智能地替换引号
+                import re
+
+                # 先替换所有中文引号为英文引号
+                cleaned_response = cleaned_response.replace('"', '"').replace('"', '"')
+                cleaned_response = cleaned_response.replace(''', "'").replace(''', "'")
+
+                # 尝试查找第一个 { 和最后一个 }，提取JSON部分
+                start_idx = cleaned_response.find('{')
+                end_idx = cleaned_response.rfind('}')
+                if start_idx != -1 and end_idx != -1:
+                    cleaned_response = cleaned_response[start_idx:end_idx + 1]
+                    logger.debug(f"Extracted JSON from response (length: {len(cleaned_response)})")
+                else:
+                    logger.warning(f"No valid JSON structure found in response")
+
+                # 尝试解析 JSON
+                try:
+                    habits_data = json.loads(cleaned_response)
+                except json.JSONDecodeError as e:
+                    logger.error(f"Failed to parse habits JSON after cleaning: {e}")
+                    logger.error(f"Cleaned response (first 1000 chars): {cleaned_response[:1000] if cleaned_response else 'empty'}")
+                    logger.error(f"Original response (first 1000 chars): {response[:1000] if response else 'empty'}")
+
+                    # 尝试修复常见的 JSON 错误
+                    try:
+                        # 修复尾随逗号
+                        cleaned_response = cleaned_response.replace(',\n}', '\n}').replace(',\n]', '\n]')
+                        cleaned_response = cleaned_response.replace(', }', '}').replace(', ]', ']')
+
+                        # 智能修复字符串内部的引号
+                        # 使用一个简单的状态机来识别字符串并转义其中的引号
+                        def fix_json_string(s):
+                            result = []
+                            in_string = False
+                            escape_next = False
+                            quote_char = None
+
+                            for i, char in enumerate(s):
+                                if escape_next:
+                                    # 转义字符，直接添加
+                                    result.append(char)
+                                    escape_next = False
+                                    continue
+
+                                if char == '\\':
+                                    # 转义字符
+                                    result.append(char)
+                                    escape_next = True
+                                    continue
+
+                                if not in_string:
+                                    # 不在字符串中
+                                    if char in ['"', "'"]:
+                                        # 开始字符串
+                                        in_string = True
+                                        quote_char = char
+                                        result.append(char)
+                                    else:
+                                        result.append(char)
+                                else:
+                                    # 在字符串中
+                                    if char == quote_char:
+                                        # 结束字符串
+                                        in_string = False
+                                        quote_char = None
+                                        result.append(char)
+                                    elif char in ['"', "'"]:
+                                        # 字符串内部的引号，需要转义
+                                        result.append('\\' + char)
+                                    else:
+                                        result.append(char)
+
+                            return ''.join(result)
+
+                        cleaned_response = fix_json_string(cleaned_response)
+
+                        # 修复可能的注释（虽然不应该有）
+                        cleaned_response = re.sub(r'//.*?\n', '\n', cleaned_response)
+                        cleaned_response = re.sub(r'/\*.*?\*/', '', cleaned_response, flags=re.DOTALL)
+
+                        habits_data = json.loads(cleaned_response)
+                        logger.info("Successfully parsed habits JSON after fixing common errors")
+                    except json.JSONDecodeError as e2:
+                        logger.error(f"Failed to parse habits JSON even after fixing: {e2}")
+                        return False
                 if isinstance(habits_data, dict):
                     async with self._state_lock:
                         self._state.speaking_habits = habits_data.get("speaking_habits", [])
                         self._state.behavior_habits = habits_data.get("behavior_habits", [])
                         self._state.interests = habits_data.get("interests", [])
                         self._state.preferences = habits_data.get("preferences", {})
+                        # 保存人格哈希值 / Save personality hash
+                        self._state.personality_hash = personality_hash
 
-                    logger.info("Generated habits successfully")
+                    # Habits are saved to state file, not config file
+                    # 习惯已保存到状态文件，不保存到配置文件（避免丢失注释）
+                    logger.info(f"Generated habits successfully: {len(self._state.speaking_habits)} speaking habits, {len(self._state.behavior_habits)} behavior habits, {len(self._state.interests)} interests (saved to state file)")
+                    logger.info(f"Saved personality hash: {self._state.personality_hash}")
                     return True
-            except json.JSONDecodeError:
-                logger.error(f"Failed to parse habits JSON: {response}")
+                else:
+                    logger.error(f"Invalid habits data type: {type(habits_data)}")
+            except json.JSONDecodeError as e:
+                logger.error(f"Failed to parse habits JSON: {e}")
+                logger.error(f"Cleaned response (first 500 chars): {cleaned_response[:500] if cleaned_response else 'empty'}")
+                logger.error(f"Original response (first 500 chars): {response[:500] if response else 'empty'}")
+            except Exception as e:
+                logger.error(f"Unexpected error parsing habits: {e}", exc_info=True)
 
         except Exception as e:
             logger.error(f"Failed to generate habits: {e}", exc_info=True)
@@ -1724,13 +2019,18 @@ verbose = false
         """获取人格描述 / Get personality description"""
         try:
             from src.config.config import global_config
-            personality_file = getattr(global_config.personality, 'personality_file', '')
-            if personality_file and os.path.exists(personality_file):
-                with open(personality_file, 'r', encoding='utf-8') as f:
-                    return f.read()[:500]  # Limit to 500 chars
+            # 直接读取 personality 字段，而不是 personality_file
+            personality = getattr(global_config.personality, 'personality', '')
+            if personality:
+                # 限制长度为 500 字符
+                personality = personality[:500]
+                logger.info(f"Personality loaded (length: {len(personality)}): {personality[:100]}...")
+                return personality
         except Exception as e:
-            logger.warning(f"Failed to read personality file: {e}")
-        return "一个友好、开朗的AI助手"
+            logger.warning(f"Failed to read personality: {e}")
+        default_personality = "一个友好、开朗的AI助手"
+        logger.info(f"Using default personality: {default_personality}")
+        return default_personality
 
     async def _get_habits_text(self) -> str:
         """获取习惯文本 / Get habits text"""
@@ -1742,7 +2042,9 @@ verbose = false
                 habits_list.append(f"行为习惯: {', '.join(self._state.behavior_habits)}")
             if self._state.interests:
                 habits_list.append(f"兴趣爱好: {', '.join(self._state.interests)}")
-            return "\n".join(habits_list) if habits_list else "暂无习惯"
+            habits_text = "\n".join(habits_list) if habits_list else "暂无习惯"
+            logger.debug(f"Habits text: {habits_text[:100]}...")
+            return habits_text
 
     async def _get_recent_messages(self) -> str:
         """获取最近消息 / Get recent messages"""
@@ -1766,13 +2068,14 @@ verbose = false
             )
 
         if not has_habits and use_ai_generation:
-            await self._generate_habits()
+            success = await self._generate_habits()
+            if success:
+                # 立即保存状态，确保人格哈希值被保存
+                await self._save_state()
         elif not has_habits:
-            # Load from config / 从配置加载
-            async with self._state_lock:
-                self._state.speaking_habits = self.get_config("habits.speaking_habits", [])
-                self._state.behavior_habits = self.get_config("habits.behavior_habits", [])
-                self._state.interests = self.get_config("habits.interests", [])
+            # No habits and AI generation disabled, use empty habits
+            # 没有习惯且AI生成已禁用，使用空习惯
+            logger.info("No habits set and AI generation disabled, using empty habits")
 
     # ============================================================
     # State Management / 状态管理
@@ -1793,6 +2096,9 @@ verbose = false
         if regenerate_daily and self._state.schedule_generated_date != date_str:
             await self._generate_schedule()
 
+        # Update sleep state based on schedule and fatigue / 根据日程和疲劳度更新睡眠状态
+        await self._update_sleep_state()
+
         # Check for random events / 检查随机事件
         random_event_probability = self.get_config("schedule.random_event_probability", 0.1)
         if random.random() < random_event_probability:
@@ -1805,6 +2111,127 @@ verbose = false
 
         async with self._state_lock:
             self._state.last_update = current_time.timestamp()
+
+    async def _update_sleep_state(self):
+        """更新睡眠状态 / Update sleep state"""
+        sleep_enabled = self.get_config("sleep.enabled", True)
+        if not sleep_enabled:
+            return
+
+        try:
+            async with self._state_lock:
+                current_time = await self._time_api.get_current_time()
+                current_hour = current_time.hour
+                current_minute = current_time.minute
+                current_time_minutes = current_hour * 60 + current_minute
+
+                # 检查当前日程活动 / Check current schedule activity
+                current_activity = self._state.current_activity
+                schedule = self._state.schedule
+
+                # 查找当前时间的日程活动 / Find schedule activity for current time
+                schedule_activity = None
+                for activity in schedule:
+                    activity_time = activity.get("time", "")
+                    if ":" in activity_time:
+                        try:
+                            hour, minute = map(int, activity_time.split(":"))
+                            activity_time_minutes = hour * 60 + minute
+
+                            # 如果当前时间在活动时间前后5分钟内
+                            if abs(current_time_minutes - activity_time_minutes) <= 5:
+                                schedule_activity = activity.get("activity_type", "")
+                                break
+                        except (ValueError, IndexError):
+                            pass
+
+                # 日程联动：如果当前日程为睡眠活动，进入睡眠状态 / Schedule integration: sleep if current activity is sleep
+                if schedule_activity == "sleep":
+                    if self._state.sleep_state == SleepState.AWAKE:
+                        logger.info("Schedule activity is sleep, entering sleep state")
+                        self._state.sleep_state = SleepState.FALLING_ASLEEP
+                        self._state.last_sleep_time = current_time.timestamp()
+                else:
+                    # 日程切换：如果当前日程不是睡眠活动，从睡眠中醒来 / Schedule change: wake up if current activity is not sleep
+                    if self._state.sleep_state in [SleepState.LIGHT_SLEEP, SleepState.DEEP_SLEEP]:
+                        logger.info(f"Schedule changed from sleep to {schedule_activity}, waking up")
+                        self._state.sleep_state = SleepState.WAKING_UP
+                        self._state.last_wake_time = current_time.timestamp()
+
+                # 根据疲劳度判断是否应该入睡 / Check if should sleep based on fatigue
+                if self._state.sleep_state == SleepState.AWAKE:
+                    if self._state.fatigue >= 80:
+                        logger.info(f"High fatigue ({self._state.fatigue}), entering sleepy state")
+                        self._state.sleep_state = SleepState.SLEEPY
+                    elif self._state.fatigue >= 60:
+                        # 小概率进入困倦状态
+                        if random.random() < 0.3:
+                            logger.info(f"Moderate fatigue ({self._state.fatigue}), entering sleepy state")
+                            self._state.sleep_state = SleepState.SLEEPY
+
+                # 更新睡眠状态 / Update sleep state
+                if self._state.sleep_state == SleepState.SLEEPY:
+                    # 困倦状态，可能入睡
+                    if self._state.fatigue >= 70:
+                        self._state.sleep_state = SleepState.FALLING_ASLEEP
+                        self._state.last_sleep_time = current_time.timestamp()
+                        logger.info("Entering falling asleep state due to high fatigue")
+
+                elif self._state.sleep_state == SleepState.FALLING_ASLEEP:
+                    # 入睡中，进入浅睡
+                    self._state.sleep_state = SleepState.LIGHT_SLEEP
+                    logger.info("Entering light sleep state")
+
+                elif self._state.sleep_state == SleepState.LIGHT_SLEEP:
+                    # 浅睡状态，可能进入深睡
+                    if self._state.fatigue >= 50:
+                        if random.random() < 0.5:
+                            self._state.sleep_state = SleepState.DEEP_SLEEP
+                            logger.info("Entering deep sleep state")
+
+                    # 睡眠期间恢复疲劳度和健康度 / Recover fatigue and health during sleep
+                    self._state.fatigue = max(0, self._state.fatigue - 2)
+                    self._state.health = min(100, self._state.health + 1)
+
+                    # 检查睡眠时长，决定是否醒来 / Check sleep duration and decide if should wake up
+                    if self._state.last_sleep_time > 0:
+                        sleep_duration_hours = (current_time.timestamp() - self._state.last_sleep_time) / 3600
+                        min_sleep_hours = self.get_config("sleep.min_sleep_hours", 4)
+                        max_sleep_hours = self.get_config("sleep.max_sleep_hours", 10)
+
+                        if sleep_duration_hours >= max_sleep_hours:
+                            logger.info(f"Max sleep duration reached ({max_sleep_hours} hours), waking up")
+                            self._state.sleep_state = SleepState.WAKING_UP
+                        elif sleep_duration_hours >= min_sleep_hours and self._state.fatigue < 30:
+                            logger.info(f"Min sleep duration reached and fatigue recovered, waking up")
+                            self._state.sleep_state = SleepState.WAKING_UP
+
+                elif self._state.sleep_state == SleepState.DEEP_SLEEP:
+                    # 深睡状态，快速恢复
+                    self._state.fatigue = max(0, self._state.fatigue - 3)
+                    self._state.health = min(100, self._state.health + 2)
+
+                    # 检查睡眠时长
+                    if self._state.last_sleep_time > 0:
+                        sleep_duration_hours = (current_time.timestamp() - self._state.last_sleep_time) / 3600
+                        min_sleep_hours = self.get_config("sleep.min_sleep_hours", 4)
+                        max_sleep_hours = self.get_config("sleep.max_sleep_hours", 10)
+
+                        if sleep_duration_hours >= max_sleep_hours:
+                            logger.info(f"Max sleep duration reached ({max_sleep_hours} hours), waking up from deep sleep")
+                            self._state.sleep_state = SleepState.WAKING_UP
+                        elif sleep_duration_hours >= min_sleep_hours and self._state.fatigue < 20:
+                            logger.info(f"Min sleep duration reached and fatigue recovered, waking up from deep sleep")
+                            self._state.sleep_state = SleepState.WAKING_UP
+
+                elif self._state.sleep_state == SleepState.WAKING_UP:
+                    # 醒来中，变为清醒
+                    self._state.sleep_state = SleepState.AWAKE
+                    self._state.last_wake_time = current_time.timestamp()
+                    logger.info("Woke up, now awake")
+
+        except Exception as e:
+            logger.error(f"Failed to update sleep state: {e}", exc_info=True)
 
     async def _handle_event(self, event: Dict[str, Any]):
         """处理事件 / Handle event"""
@@ -1860,8 +2287,10 @@ verbose = false
         """保存状态 / Save state"""
         try:
             state_data = self._state.to_dict()
+            logger.debug(f"Saving state with personality_hash: {state_data.get('personality_hash', 'N/A')}")
             with open(self._state_file, 'w', encoding='utf-8') as f:
                 json.dump(state_data, f, indent=2, ensure_ascii=False)
+            logger.debug("State saved successfully")
         except Exception as e:
             logger.error(f"Failed to save state: {e}", exc_info=True)
 
@@ -1872,7 +2301,9 @@ verbose = false
                 with open(self._state_file, 'r', encoding='utf-8') as f:
                     state_data = json.load(f)
                 self._state.from_dict(state_data)
-                logger.info("State loaded successfully")
+                logger.info(f"State loaded successfully, personality_hash: {self._state.personality_hash}")
+            else:
+                logger.info("State file does not exist, using initial state")
         except Exception as e:
             logger.error(f"Failed to load state: {e}", exc_info=True)
 
@@ -1947,7 +2378,7 @@ class MessageEventHandler(BaseEventHandler):
         # 消息时按概率略微增加疲劳度和饥饿度
         import random
 
-        update_probability = _plugin_instance._config.get("message_state_update_probability", 0.7)
+        update_probability = _plugin_instance.get_config("state.message_state_update_probability", 0.7)
         if random.random() < update_probability:
             async with _plugin_instance._state_lock:
                 _plugin_instance._state.fatigue = min(100, _plugin_instance._state.fatigue + 1)
@@ -1993,6 +2424,141 @@ class SocialNetworkEventHandler(BaseEventHandler):
             logger.error(f"Error in social network event handler: {e}")
 
         return True, True, None, None, None
+
+
+class MessageSleepEventHandler(BaseEventHandler):
+    """睡眠消息事件处理器 / Sleep Message Event Handler"""
+
+    event_type = EventType.ON_MESSAGE
+    handler_name = "life_simulation_sleep"
+    handler_description = "Handle sleep state and block messages during sleep / 处理睡眠状态，睡眠期间拦截消息"
+    weight = 100  # 高优先级，在其他处理器之前执行
+
+    async def execute(self, message: MaiMessages | None) -> Tuple[bool, bool, Optional[str], None, None]:
+        if not _plugin_instance or not message:
+            return True, True, None, None, None
+
+        # 检查是否启用睡眠系统 / Check if sleep system is enabled
+        sleep_enabled = _plugin_instance.get_config("sleep.enabled", True)
+        if not sleep_enabled:
+            return True, True, None, None, None
+
+        # 检查当前睡眠状态 / Check current sleep state
+        sleep_state = _plugin_instance._state.sleep_state
+
+        # 如果清醒，正常处理 / If awake, process normally
+        if sleep_state == SleepState.AWAKE:
+            return True, True, None, None, None
+
+        # 如果在睡眠状态，处理消息 / If sleeping, handle message
+        try:
+            # 获取发送者信息 / Get sender information
+            user_id = str(message.sender_id) if hasattr(message, 'sender_id') else ""
+            user_name = message.sender_name if hasattr(message, 'sender_name') else "Unknown"
+            message_content = message.plain_text if hasattr(message, 'plain_text') else ""
+
+            # 记录睡眠期间的消息 / Log messages during sleep
+            logger.debug(f"Received message during sleep (state: {sleep_state.value}) from {user_name}")
+
+            # 检查是否应该回复 / Check if should reply
+            should_reply = False
+            reply_message = None
+
+            # 检查打扰唤醒 / Check disturbance wake-up
+            disturbance_enabled = _plugin_instance.get_config("sleep.disturbance_enabled", True)
+            if disturbance_enabled:
+                # 检查消息频率 / Check message frequency
+                message_freq_threshold = _plugin_instance.get_config("sleep.message_freq_threshold", 3)
+                # 这里简化处理，实际应该记录最近的消息
+                # Simplified here, should actually track recent messages
+
+                # 检查亲密度 / Check intimacy
+                intimacy_wake_threshold = _plugin_instance.get_config("sleep.intimacy_wake_threshold", 60)
+                if _plugin_instance._social_network and _plugin_instance._social_network.is_enabled():
+                    relationship = _plugin_instance._social_network.get_relationship(user_id)
+                    if relationship and relationship.intimacy > intimacy_wake_threshold:
+                        # 关系亲密，可能唤醒 / High intimacy, may wake up
+                        pass
+
+                # 检查紧急关键词 / Check emergency keywords
+                emergency_keywords = ["紧急", "救命", "快点", "重要", "急事"]
+                if any(keyword in message_content for keyword in emergency_keywords):
+                    logger.info(f"Emergency keyword detected, may wake up")
+                    # 可以在这里触发唤醒逻辑
+                    # Can trigger wake-up logic here
+
+            # 检查AI自动回复 / Check AI auto-reply
+            ai_reply_enabled = _plugin_instance.get_config("sleep.ai_reply_enabled", True)
+            if ai_reply_enabled:
+                # 使用AI判断是否回复 / Use AI to judge if should reply
+                ai_reply_probability = _plugin_instance.get_config("sleep.ai_reply_probability", 0.3)
+                import random
+
+                if random.random() < ai_reply_probability:
+                    # AI判断是否回复 / AI judges if should reply
+                    try:
+                        # 构建提示词 / Build prompt
+                        sleep_duration = int((time.time() - _plugin_instance._state.last_sleep_time) / 60) if _plugin_instance._state.last_sleep_time > 0 else 0
+                        prompt = _plugin_instance._get_prompt(
+                            "sleep_reply_judgment",
+                            sleep_state=sleep_state.value,
+                            sleep_duration=sleep_duration,
+                            message_count=1,  # 简化处理 / Simplified
+                            user_name=user_name,
+                            message_content=message_content[:200]
+                        )
+
+                        # 调用LLM / Call LLM
+                        ai_model = _plugin_instance.get_config("sleep.ai_model", "replyer")
+                        model_config = _plugin_instance._get_model_config(ai_model)
+                        if model_config:
+                            temperature = _plugin_instance.get_config("ai.temperature", 0.7)
+                            max_tokens = _plugin_instance.get_config("ai.max_tokens", 200)
+
+                            success, response, reasoning, model_used = await llm_api.generate_with_model(
+                                prompt=prompt,
+                                model_config=model_config,
+                                temperature=temperature,
+                                max_tokens=max_tokens
+                            )
+
+                            if success:
+                                # 解析AI响应 / Parse AI response
+                                response = response.strip()
+                                if response.lower() in ["yes", "是", "true"]:
+                                    should_reply = True
+                                    # 获取回复内容 / Get reply content
+                                    # 这里简化处理，实际应该解析完整的JSON响应
+                                    # Simplified here, should actually parse complete JSON response
+                                    reply_message = _plugin_instance.get_config("sleep.sleep_reply", "我现在在睡觉，明天再聊~")
+                                else:
+                                    should_reply = False
+                    except Exception as e:
+                        logger.error(f"Error in AI sleep reply judgment: {e}")
+
+            # 如果AI不回复，使用默认回复 / If AI doesn't reply, use default reply
+            if should_reply and not reply_message:
+                reply_message = _plugin_instance.get_config("sleep.sleep_reply", "我现在在睡觉，明天再聊~")
+
+            # 如果应该回复，发送回复 / If should reply, send reply
+            if should_reply and reply_message:
+                try:
+                    await send_api.send_text(
+                        message.chat_id,
+                        reply_message,
+                        reply_message_id=message.message_id if hasattr(message, 'message_id') else None
+                    )
+                    logger.info(f"Sent sleep reply to {user_name}: {reply_message}")
+                except Exception as e:
+                    logger.error(f"Error sending sleep reply: {e}")
+
+            # 返回 false 阻止后续处理 / Return false to block further processing
+            return False, False, None, None, None
+
+        except Exception as e:
+            logger.error(f"Error in sleep event handler: {e}", exc_info=True)
+            # 出错时也阻止处理 / Block processing on error
+            return False, False, None, None, None
 
 
 # ============================================================
@@ -2252,6 +2818,125 @@ class SocialNetworkCommand(BaseCommand):
             return False, None, 0
 
 
+class GetStatusTool(BaseTool):
+    """获取状态工具 / Get Status Tool"""
+
+    name = "get_life_simulation_status"
+    description = "查询机器人的当前状态，包括生理状态（睡眠、疲劳、饥饿、健康、情绪）、当前活动、节日信息等。在以下情况下使用此工具：1)用户询问机器人的状态；2)需要根据状态调整回复内容（比如疲劳时简短回复）；3)需要根据情绪调整语气；4)需要知道当前是否在睡觉。此工具返回详细的状态信息，帮助更好地理解机器人的当前状况。"
+    parameters = []
+    available_for_llm = True
+
+    async def execute(self, function_args: dict[str, Any]) -> dict[str, Any]:
+        """执行工具 / Execute tool"""
+        try:
+            if not _plugin_instance:
+                return {
+                    "name": self.name,
+                    "content": "生活模拟插件未就绪",
+                    "error": "Plugin not ready"
+                }
+
+            state = await _plugin_instance.get_state()
+
+            # 构建状态信息 / Build status information
+            status_lines = []
+
+            # 睡眠状态 / Sleep state
+            sleep_state = state.get("sleep_state", "awake")
+            sleep_state_cn = {
+                "awake": "清醒",
+                "sleepy": "困倦",
+                "falling_asleep": "入睡中",
+                "light_sleep": "浅睡",
+                "deep_sleep": "深睡",
+                "waking_up": "醒来中"
+            }.get(sleep_state, sleep_state)
+            status_lines.append(f"😴 睡眠状态: {sleep_state_cn}")
+
+            # 疲劳度 / Fatigue
+            fatigue = state.get("fatigue", 0)
+            fatigue_desc = "精力充沛" if fatigue < 20 else "精力良好" if fatigue < 40 else "轻微疲劳" if fatigue < 60 else "明显疲劳" if fatigue < 80 else "严重疲劳"
+            status_lines.append(f"😫 疲劳度: {fatigue}/100 ({fatigue_desc})")
+
+            # 饥饿度 / Hunger
+            hunger = state.get("hunger", 0)
+            hunger_desc = "不饿" if hunger < 20 else "轻微饥饿" if hunger < 40 else "饥饿" if hunger < 60 else "很饿" if hunger < 80 else "非常饿"
+            status_lines.append(f"🍔 饥饿度: {hunger}/100 ({hunger_desc})")
+
+            # 健康状态 / Health status
+            health = state.get("health", 100)
+            health_status = state.get("health_status", "healthy")
+            health_status_cn = {
+                "healthy": "健康",
+                "recovering": "康复中",
+                "slightly_ill": "轻微不适",
+                "ill": "生病",
+                "seriously_ill": "严重生病"
+            }.get(health_status, health_status)
+            status_lines.append(f"❤️ 健康度: {health}/100 ({health_status_cn})")
+
+            # 情绪状态 / Emotion state
+            emotion = state.get("current_emotion", "calm")
+            emotion_intensity = state.get("emotion_intensity", 0)
+            emotion_cn = {
+                "happy": "开心",
+                "sad": "伤心",
+                "angry": "生气",
+                "anxious": "焦虑",
+                "excited": "兴奋",
+                "calm": "平静",
+                "tired": "疲惫",
+                "bored": "无聊"
+            }.get(emotion, emotion)
+            emotion_desc = f"情绪: {emotion_cn}"
+            if emotion_intensity > 0:
+                intensity_desc = "轻微" if emotion_intensity < 20 else "一般" if emotion_intensity < 40 else "明显" if emotion_intensity < 60 else "强烈" if emotion_intensity < 80 else "非常强烈"
+                emotion_desc += f" ({intensity_desc}, {emotion_intensity}/100)"
+            status_lines.append(f"😊 {emotion_desc}")
+
+            # 当前活动 / Current activity
+            current_activity = state.get("current_activity", "idle")
+            current_activity_description = state.get("current_activity_description", "")
+            activity_line = f"🏃 当前活动: {current_activity}"
+            if current_activity_description:
+                activity_line += f" - {current_activity_description}"
+            status_lines.append(activity_line)
+
+            # 节日信息 / Holiday information
+            is_holiday = state.get("is_holiday", False)
+            current_holiday = state.get("current_holiday", "")
+            if is_holiday and current_holiday:
+                status_lines.append(f"🎉 节日: {current_holiday}")
+            else:
+                status_lines.append("🎉 节日: 无")
+
+            # 合并信息 / Combine information
+            content = "\n".join(status_lines)
+
+            return {
+                "name": self.name,
+                "content": content,
+                "sleep_state": sleep_state,
+                "fatigue": fatigue,
+                "hunger": hunger,
+                "health": health,
+                "health_status": health_status,
+                "emotion": emotion,
+                "emotion_intensity": emotion_intensity,
+                "current_activity": current_activity,
+                "current_activity_description": current_activity_description,
+                "is_holiday": is_holiday,
+                "current_holiday": current_holiday
+            }
+        except Exception as e:
+            logger.error(f"GetStatusTool failed: {e}", exc_info=True)
+            return {
+                "name": self.name,
+                "content": f"获取状态信息失败: {str(e)}",
+                "error": str(e)
+            }
+
+
 # ============================================================
 # Tools / 工具
 # ============================================================
@@ -2260,7 +2945,7 @@ class GetHabitsTool(BaseTool):
     """获取习惯工具 / Get Habits Tool"""
 
     name = "get_life_simulation_habits"
-    description = "获取生活模拟插件中的个人习惯信息，包括说话习惯、行为习惯、兴趣爱好和偏好设置"
+    description = "查询机器人的个人习惯信息，包括说话习惯、行为习惯、兴趣爱好和偏好设置。在以下情况下使用此工具：1)用户询问机器人的性格特点或习惯；2)用户要求查看或了解机器人的习惯；3)需要根据机器人的习惯调整回复风格；4)需要提供个性化回复时。此工具返回机器人的习惯详情，帮助更好地理解机器人的性格特征。"
     parameters = []
     available_for_llm = True
 
@@ -2317,14 +3002,9 @@ class GetSocialNetworkTool(BaseTool):
     """获取社交网络工具 / Get Social Network Tool"""
 
     name = "get_social_network_info"
-    description = "获取社交网络信息，包括用户关系、亲密度和互动历史。可以查询特定用户的关系，或获取所有用户的摘要。"
+    description = "查询社交网络信息，包括用户关系、亲密度和互动历史。在以下情况下使用此工具：1)用户询问与某人的关系程度；2)需要了解与特定用户的互动历史；3)需要根据关系程度调整互动方式；4)需要提供个性化回复时。如果提供user_id参数，返回该用户的详细关系信息；如果不提供，返回所有用户的摘要。"
     parameters = [
-        {
-            "name": "user_id",
-            "type": "string",
-            "description": "用户ID（可选），如果提供则查询该用户的详细关系信息，如果不提供则返回所有用户的摘要",
-            "required": False
-        }
+        ("user_id", ToolParamType.STRING, "用户ID（可选），如果提供则查询该用户的详细关系信息，如果不提供则返回所有用户的摘要", False, None)
     ]
     available_for_llm = True
 
@@ -2413,26 +3093,11 @@ class SetRelationshipTool(BaseTool):
     """设置关系工具 / Set Relationship Tool"""
 
     name = "set_user_relationship"
-    description = "设置用户的关系类型，包括陌生人、熟人、朋友、好友、挚友、家人、伴侣、敌人、拉黑。注意：拉黑和敌人关系需要谨慎使用。"
+    description = "设置用户的关系类型，包括陌生人、熟人、朋友、好友、挚友、家人、伴侣、敌人、拉黑。在以下情况下使用此工具：1)用户明确要求改变关系；2)根据互动情况需要调整关系程度；3)需要明确与用户的关系类型。注意：拉黑和敌人关系需要谨慎使用，只有在用户明确要求或有充分理由时才使用。"
     parameters = [
-        {
-            "name": "user_id",
-            "type": "string",
-            "description": "用户ID，要设置关系的用户",
-            "required": True
-        },
-        {
-            "name": "relationship_type",
-            "type": "string",
-            "description": "关系类型，可选值：stranger(陌生人), acquaintance(熟人), friend(朋友), close_friend(好友), best_friend(挚友), family(家人), partner(伴侣), enemy(敌人), blocked(拉黑)",
-            "required": True
-        },
-        {
-            "name": "reason",
-            "type": "string",
-            "description": "设置关系的原因（可选），用于记录",
-            "required": False
-        }
+        ("user_id", ToolParamType.STRING, "用户ID，要设置关系的用户", True, None),
+        ("relationship_type", ToolParamType.STRING, "关系类型，可选值：stranger(陌生人), acquaintance(熟人), friend(朋友), close_friend(好友), best_friend(挚友), family(家人), partner(伴侣), enemy(敌人), blocked(拉黑)", True, None),
+        ("reason", ToolParamType.STRING, "设置关系的原因（可选），用于记录", False, None)
     ]
     available_for_llm = True
 
@@ -2545,5 +3210,74 @@ class SetRelationshipTool(BaseTool):
             return {
                 "name": self.name,
                 "content": f"设置关系失败: {str(e)}",
+                "error": str(e)
+            }
+
+
+class GetScheduleTool(BaseTool):
+    """获取日程工具 / Get Schedule Tool"""
+
+    name = "get_life_simulation_schedule"
+    description = "查询机器人的日程安排，包括当前活动、今天的所有活动和日程生成日期。在以下情况下使用此工具：1)用户询问机器人的日程安排；2)需要了解机器人当前正在做什么；3)需要根据日程调整回复内容；4)用户询问机器人是否有空等。此工具返回详细的日程信息，帮助更好地理解机器人的时间安排。"
+    parameters = []
+    available_for_llm = True
+
+    async def execute(self, function_args: dict[str, Any]) -> dict[str, Any]:
+        """执行工具 / Execute tool"""
+        try:
+            if not _plugin_instance:
+                return {
+                    "name": self.name,
+                    "content": "生活模拟插件未就绪",
+                    "error": "Plugin not ready"
+                }
+
+            state = await _plugin_instance.get_state()
+
+            # 获取当前活动 / Get current activity
+            current_activity = state.get("current_activity", "idle")
+            current_activity_description = state.get("current_activity_description", "")
+            schedule_generated_date = state.get("schedule_generated_date", "")
+            schedule = state.get("schedule", [])
+
+            # 构建当前活动信息 / Build current activity info
+            current_info = f"🏃 当前活动: {current_activity}"
+            if current_activity_description:
+                current_info += f" - {current_activity_description}"
+
+            # 构建日程信息 / Build schedule info
+            schedule_info = []
+            if schedule:
+                schedule_info.append(f"📅 日程安排 ({schedule_generated_date}):")
+                for activity in schedule:
+                    time_str = activity.get("time", "")
+                    activity_type = activity.get("activity_type", "")
+                    description = activity.get("description", "")
+                    priority = activity.get("priority", 0)
+
+                    schedule_info.append(f"⏰ {time_str} - {activity_type}")
+                    if description:
+                        schedule_info.append(f"   {description}")
+                    if priority:
+                        schedule_info.append(f"   [优先级: {priority}]")
+            else:
+                schedule_info.append("📅 暂无日程安排")
+
+            # 合并信息 / Combine information
+            content = current_info + "\n\n" + "\n".join(schedule_info)
+
+            return {
+                "name": self.name,
+                "content": content,
+                "current_activity": current_activity,
+                "current_activity_description": current_activity_description,
+                "schedule_generated_date": schedule_generated_date,
+                "schedule": schedule
+            }
+        except Exception as e:
+            logger.error(f"GetScheduleTool failed: {e}", exc_info=True)
+            return {
+                "name": self.name,
+                "content": f"获取日程信息失败: {str(e)}",
                 "error": str(e)
             }
