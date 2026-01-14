@@ -7,16 +7,16 @@
   "description": "AI-driven life simulation: schedule, events, habits, holidays, and emotion judgment for human-like behavior",
   "description_zh-CN": "AI驱动的生活模拟：日程、事件、习惯、节日和情绪判断，实现拟人化行为",
   "author": {
-    "name": "MaiBot Team",
-    "url": "https://github.com/Mai-with-u/MaiBot"
+    "name": "GLM4.5 and Skon",
+    "url": "https://github.com/SkonJIYHD/LifeSimulationPlugin"
   },
   "license": "AGPL-3.0-or-later",
   "host_application": {
     "min_version": "0.12.0",
     "max_version": ""
   },
-  "homepage_url": "https://github.com/Mai-with-u/MaiBot",
-  "repository_url": "https://github.com/Mai-with-u/MaiBot",
+  "homepage_url": "https://github.com/SkonJIYHD/LifeSimulationPlugin",
+  "repository_url": "https://github.com/SkonJIYHD/LifeSimulationPlugin",
   "keywords": [
     "life",
     "simulation",
