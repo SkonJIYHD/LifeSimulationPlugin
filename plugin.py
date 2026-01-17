@@ -162,6 +162,12 @@ class LifeState:
         self.health: int = 100  # 0-100
         self.health_status: HealthStatus = HealthStatus.HEALTHY
 
+        # Illness information / 疾病信息
+        self.illness_name: str = ""  # 疾病名称
+        self.illness_reason: str = ""  # 生病原因
+        self.illness_symptoms: str = ""  # 症状描述
+        self.illness_treatment: str = ""  # 治疗建议
+
         # Emotion state / 情绪状态
         self.current_emotion: str = "calm"
         self.emotion_intensity: int = 0  # 0-100
@@ -192,6 +198,10 @@ class LifeState:
         # Social Network / 社交网络
         self.social_network: Dict[str, UserRelationship] = {}  # 用户ID -> 用户关系
         self.social_network_enabled: bool = True  # 是否启用社交网络
+
+        # Recent events / 最近事件
+        self.recent_event: Dict[str, Any] = {}  # 最近处理的随机事件
+        self.recent_event_time: float = 0.0  # 最近事件的时间戳
 
         # Update timestamp / 更新时间戳
         self.last_update: float = 0.0
@@ -225,6 +235,8 @@ class LifeState:
             "social_network": {
                 user_id: rel.to_dict() for user_id, rel in self.social_network.items()
             },
+            "recent_event": self.recent_event,
+            "recent_event_time": self.recent_event_time,
             "last_update": self.last_update,
         }
 
@@ -238,6 +250,10 @@ class LifeState:
             self.hunger = data.get("hunger", 0)
             self.health = data.get("health", 100)
             self.health_status = HealthStatus(data.get("health_status", HealthStatus.HEALTHY.value))
+            self.illness_name = data.get("illness_name", "")
+            self.illness_reason = data.get("illness_reason", "")
+            self.illness_symptoms = data.get("illness_symptoms", "")
+            self.illness_treatment = data.get("illness_treatment", "")
             self.current_emotion = data.get("current_emotion", "calm")
             self.emotion_intensity = data.get("emotion_intensity", 0)
             self.emotion_reason = data.get("emotion_reason", "")
@@ -264,6 +280,8 @@ class LifeState:
                 except Exception as e:
                     logger.warning(f"Failed to load relationship for user {user_id}: {e}")
 
+            self.recent_event = data.get("recent_event", {})
+            self.recent_event_time = data.get("recent_event_time", 0.0)
             self.last_update = data.get("last_update", 0.0)
         except Exception as e:
             logger.error(f"Failed to load state from dict: {e}")
@@ -344,17 +362,27 @@ class SocialNetwork:
 
                 if self.intimacy_growth_method == "ai":
                     # AI判断 / AI judgment
-                    intimacy_increase = await self._judge_intimacy_increase(
-                        relationship, message_content, plugin_instance
-                    )
+                    # 添加概率控制，避免每次都调用AI / Add probability control to avoid calling AI every time
+                    import random
+                    ai_judgment_probability = plugin_instance.get_config("social_network.ai_judgment_probability", 0.3) if plugin_instance else 0.3
+                    
+                    if random.random() < ai_judgment_probability:
+                        logger.debug(f"[SOCIAL] Using AI judgment for intimacy increase (probability: {ai_judgment_probability})")
+                        intimacy_increase = await self._judge_intimacy_increase(
+                            relationship, message_content, plugin_instance
+                        )
+                    else:
+                        logger.debug(f"[SOCIAL] Skipping AI judgment (probability check failed)")
                 elif self.intimacy_growth_method == "probability":
                     # 概率判断 / Probability judgment
                     import random
                     if random.random() < self.intimacy_growth_probability:
                         intimacy_increase = self.intimacy_growth_rate
+                        logger.debug(f"[SOCIAL] Probability-based intimacy increase: {intimacy_increase}")
                 else:
                     # 固定增长 / Fixed increase
                     intimacy_increase = self.intimacy_growth_rate
+                    logger.debug(f"[SOCIAL] Fixed intimacy increase: {intimacy_increase}")
 
                 # 增加亲密度 / Increase intimacy
                 if intimacy_increase > 0:
@@ -785,6 +813,7 @@ class LifeSimulationPlugin(BasePlugin):
                 description="亲密度AI判断模型（ai方式）/ Intimacy AI judgment model (ai mode)",
                 choices=["tool_use", "planner", "replyer", "utils", "vlm", "voice", "embedding", "lpmm_entity_extract", "lpmm_rdf_build"]
             ),
+            "ai_judgment_probability": ConfigField(type=float, default=0.3, description="AI判断概率（ai方式）/ AI judgment probability (ai mode)"),
             "intimacy_decay_rate": ConfigField(type=float, default=0.1, description="亲密度衰减率 / Intimacy decay rate"),
             "decay_interval": ConfigField(type=int, default=86400, description="衰减间隔（秒）/ Decay interval (seconds)"),
         },
@@ -797,9 +826,6 @@ class LifeSimulationPlugin(BasePlugin):
             "min_sleep_hours": ConfigField(type=int, default=4, description="最短睡眠时间（小时）/ Minimum sleep duration (hours)"),
             "max_sleep_hours": ConfigField(type=int, default=10, description="最长睡眠时间（小时）/ Maximum sleep duration (hours)"),
             "allow_manual_wake": ConfigField(type=bool, default=True, description="是否允许手动唤醒 / Allow manual wake-up"),
-            "ai_reply_enabled": ConfigField(type=bool, default=True, description="启用AI判断自动回复 / Enable AI judgment for auto-reply"),
-            "ai_model": ConfigField(type=str, default="replyer", description="AI模型 / AI model"),
-            "ai_reply_probability": ConfigField(type=float, default=0.3, description="AI回复概率 / AI reply probability"),
             "disturbance_enabled": ConfigField(type=bool, default=True, description="启用打扰唤醒 / Enable disturbance wake-up"),
             "light_sleep_wake_prob": ConfigField(type=float, default=0.5, description="浅睡唤醒概率 / Light sleep wake-up probability"),
             "deep_sleep_wake_prob": ConfigField(type=float, default=0.1, description="深睡唤醒概率 / Deep sleep wake-up probability"),
@@ -828,7 +854,7 @@ class LifeSimulationPlugin(BasePlugin):
             prompts_section = config.get("prompts", {})
             has_empty_prompts = any(
                 not prompts_section.get(key, "").strip()
-                for key in ["schedule_generation", "random_event_generation", "emotion_judgment", "habit_generation"]
+                for key in ["schedule_generation", "random_event_generation", "emotion_judgment", "habit_generation", "social_network_analysis", "intimacy_judgment"]
             )
 
             if has_empty_prompts:
@@ -845,7 +871,7 @@ class LifeSimulationPlugin(BasePlugin):
             prompts_section = existing_config.get("prompts", {})
             has_empty_prompts = any(
                 not prompts_section.get(key, "").strip()
-                for key in ["schedule_generation", "random_event_generation", "emotion_judgment", "habit_generation"]
+                for key in ["schedule_generation", "random_event_generation", "emotion_judgment", "habit_generation", "social_network_analysis", "intimacy_judgment"]
             )
 
             if not has_empty_prompts:
@@ -985,7 +1011,7 @@ schedule_generation = """你是一个生活规划助手，需要为机器人生�
 请生成今天的完整日程安排（00:00-23:59），格式为JSON数组，每个元素包含：
 - time: 时间（HH:MM格式）
 - activity: 活动类型（work, leisure, meal, sleep, exercise, study, other, rest, medical）
-- description: 活动描述（简短说明）
+- description: 活动描述（详细说明，要具体描述正在做什么，例如"在图书馆写论文"、"在食堂吃午饭"、"在宿舍休息"等，不要只写"写论文"、"吃饭"、"休息"）
 - priority: 优先级（1-5，5最高）
 
 【重要】日程要求：
@@ -1098,24 +1124,113 @@ emotion_judgment = """你是一个情绪分析助手，需要判断机器人的�
 
 # 习惯生成提示词 / Habit generation prompt
 # 支持的变量 / Supported variables: {personality} / Personality
-habit_generation = """你是一个习惯分析助手，需要根据人格特点生成个人习惯。
+habit_generation = """【极其重要的规则】你必须严格遵守以下格式要求，否则生成的JSON将无法被解析！
+
+你是一个习惯分析助手，需要根据人格特点生成个人习惯。
 
 人格特点：
 {personality}
 
-请生成个人习惯，格式为JSON对象，包含：
-- speaking_habits: 说话习惯列表（如"喜欢用表情"、"喜欢用语气词"等）
-- behavior_habits: 行为习惯列表（如"早起"、"爱运动"、"爱读书"等）
-- interests: 兴趣爱好列表（如"音乐"、"电影"、"游戏"、"旅行"等）
-- preferences: 偏好设置（字典，包含food, music, movie等）
+请生成个人习惯，严格按照以下JSON格式：
 
-注意：
+{{
+  "speaking_habits": ["说话习惯1", "说话习惯2"],
+  "behavior_habits": ["行为习惯1", "行为习惯2"],
+  "interests": ["兴趣1", "兴趣2"],
+  "preferences": {{
+    "food": ["食物偏好"],
+    "music": ["音乐偏好"],
+    "movie": ["电影偏好"],
+    "books": ["书籍偏好"],
+    "colors": ["颜色偏好"],
+    "weather": ["天气偏好"],
+    "activities": ["活动偏好"]
+  }}
+}}
+
+【绝对禁止的格式错误】：
+1. ❌ JSON字符串内部绝对不能使用任何引号（包括中文引号"" ''和英文引号"" ''）
+2. ❌ 错误示例："喜欢用'嗯'、'那个'等语气词" 
+3. ❌ 错误示例："喜欢用"诶"、"嗯"等语气词"
+
+【正确的写法】：
+1. ✅ 正确示例：喜欢用嗯、那个等语气词
+2. ✅ 正确示例：喜欢用诶、嗯等语气词
+3. ✅ 如果需要引用某个词或短语，请使用括号或其他方式表达，不要使用引号
+4. ✅ 例如：不要写"喜欢用'嗯'、'那个'等语气词"，而应该写"喜欢用嗯、那个等语气词"
+
+【其他要求】：
 1. 习惯要符合人格特点
-2. 习惯要多样化
+2. 习惯要多样化（每个列表至少3-5项）
 3. 习惯要积极健康
 4. 说话习惯要自然
+5. preferences 必须包含所有字段
+6. 所有字符串值都必须用英文双引号包裹
+7. 只返回JSON对象，不要有其他内容，不要包含markdown代码块标记，直接返回纯JSON文本
 
-请只返回JSON对象，不要有其他内容。"""
+【再次强调】JSON字符串内部绝对不能使用任何引号！"""
+
+# 社交网络分析提示词 / Social network analysis prompt
+# 支持的变量 / Supported variables:
+#   {user_name} - 用户名 / User name
+#   {user_traits} - 用户特征 / User traits
+#   {relationship_type} - 关系类型 / Relationship type
+#   {intimacy} - 亲密度 / Intimacy
+social_network_analysis = """你是一个社交关系分析助手，需要分析用户与机器人的关系。
+
+当前用户信息：
+- 用户名：{user_name}
+- 用户特征：{user_traits}
+- 关系类型：{relationship_type}
+- 亲密度：{intimacy}/100
+
+请分析以下内容：
+1. 用户与机器人的关系特点
+2. 用户的性格特征
+3. 用户的兴趣爱好
+4. 适合的回复风格
+
+请用简洁的语言描述，不超过200字。"""
+
+# 亲密度判断提示词 / Intimacy judgment prompt
+# 支持的变量 / Supported variables:
+#   {user_name} - 用户名 / User name
+#   {user_traits} - 用户特征 / User traits
+#   {relationship_type} - 关系类型 / Relationship type
+#   {intimacy} - 当前亲密度 / Current intimacy
+#   {interaction_count} - 互动次数 / Interaction count
+#   {message_content} - 消息内容 / Message content
+#   {current_emotion} - 当前情绪 / Current emotion
+intimacy_judgment = """你是一个亲密度判断助手，需要根据用户的互动判断是否应该增加亲密度，以及增加多少。
+
+当前用户信息：
+- 用户名：{user_name}
+- 用户特征：{user_traits}
+- 关系类型：{relationship_type}
+- 当前亲密度：{intimacy}/100
+- 互动次数：{interaction_count}
+- 当前情绪：{current_emotion}
+- 消息内容：{message_content}
+
+请判断：
+1. 这次互动是否应该增加亲密度？（是/否）
+2. 如果应该增加，增加多少？（0-5之间的整数）
+
+判断标准：
+- 正向互动（友好、有趣、支持等）应该增加亲密度
+- 负向互动（敌对、攻击、冷漠等）不应该增加亲密度
+- 中性互动可以少量增加或不增加
+- 亲密度越高，增加的幅度应该越小
+- 互动次数越多，增加的幅度应该越小
+
+请返回JSON格式：
+{{
+  "should_increase": true/false,
+  "increase_amount": 0-5,
+  "reason": "判断原因"
+}}
+
+只返回JSON，不要有其他内容。"""
 
 # ============================================================
 # [habits] - 习惯配置 / Habits Configuration
@@ -1267,6 +1382,9 @@ verbose = false
         # 检查并生成包含提示词的配置文件（如果需要）
         self._ensure_config_with_prompts()
 
+        # Configure logging based on config file / 根据配置文件配置日志
+        self._configure_logging()
+
         # Event and task management / 事件和任务管理
         self._stop_event = asyncio.Event()
         self._scheduler_task: Optional[asyncio.Task] = None
@@ -1298,6 +1416,25 @@ verbose = false
         self._data_dir.mkdir(exist_ok=True)
 
         logger.info("LifeSimulationPlugin initialized")
+
+    def _configure_logging(self):
+        """配置日志级别 / Configure logging level"""
+        import logging
+        
+        log_level = self.get_config("logging.level", "INFO").upper()
+        verbose = self.get_config("logging.verbose", False)
+        
+        # 如果verbose为true，强制使用DEBUG级别 / If verbose is true, force DEBUG level
+        if verbose:
+            log_level = "DEBUG"
+        
+        # 设置日志级别 / Set log level
+        try:
+            logger.setLevel(log_level)
+            logger.info(f"Logging level set to: {log_level}")
+        except ValueError as e:
+            logger.warning(f"Invalid log level: {log_level}, using INFO instead")
+            logger.setLevel(logging.INFO)
 
     def get_plugin_components(self) -> List[Tuple[ComponentInfo, type]]:
         """获取插件组件 / Get plugin components"""
@@ -1480,6 +1617,23 @@ verbose = false
         """获取提示词 / Get prompt"""
         # 从配置文件获取提示词 / Get prompt from config file
         prompt = self.get_config(f"prompts.{prompt_type}", "")
+        
+        if not prompt:
+            # 如果配置文件中没有提示词，尝试从默认配置中获取
+            # Fallback: get prompt from default config
+            logger.warning(f"Prompt not found in config: {prompt_type}, trying default config")
+            default_config = self._get_default_config_content()
+            # 简单的提取逻辑：找到对应的提示词
+            import re
+            pattern = rf'^{prompt_type}\s*=\s*"""(.+?)"""'
+            match = re.search(pattern, default_config, re.MULTILINE | re.DOTALL)
+            if match:
+                prompt = match.group(1)
+                logger.info(f"Using default prompt for {prompt_type}")
+            else:
+                logger.error(f"Prompt not found in default config either: {prompt_type}")
+                return ""
+        
         if prompt:
             logger.debug(f"Prompt type: {prompt_type}, kwargs keys: {list(kwargs.keys())}")
             try:
@@ -1495,13 +1649,42 @@ verbose = false
 
     def _get_model_config(self, model_name: str) -> Any:
         """获取模型配置 / Get model config"""
-        if model_name in self._available_models:
-            return self._available_models[model_name]
+        # 检查是否使用 "类型:名称" 格式 / Check if using "type:name" format
+        if ":" in model_name:
+            model_type, specific_name = model_name.split(":", 1)
+            model_type = model_type.strip()
+            specific_name = specific_name.strip()
+            
+            # 查找匹配的模型 / Find matching models
+            matching_models = []
+            for name, config in self._available_models.items():
+                # 检查模型名称是否包含指定的具体名称 / Check if model name contains specific name
+                if specific_name.lower() in name.lower():
+                    matching_models.append((name, config))
+            
+            if matching_models:
+                # 如果有多个匹配，优先选择完全匹配的 / If multiple matches, prioritize exact match
+                for name, config in matching_models:
+                    if specific_name.lower() == name.lower():
+                        logger.info(f"Using exact match model: {name}")
+                        return config
+                
+                # 如果没有完全匹配，使用第一个匹配 / If no exact match, use first match
+                name, config = matching_models[0]
+                logger.info(f"Using matched model: {name}")
+                return config
+            else:
+                logger.warning(f"No model found matching '{specific_name}' in type '{model_type}'")
         else:
-            logger.warning(f"Model not found: {model_name}, using first available model")
-            if self._available_models:
-                return list(self._available_models.values())[0]
-            return None
+            # 原有逻辑：直接查找模型 / Original logic: direct model lookup
+            if model_name in self._available_models:
+                return self._available_models[model_name]
+        
+        # 未找到模型，返回第一个可用模型 / Model not found, return first available model
+        logger.warning(f"Model not found: {model_name}, using first available model")
+        if self._available_models:
+            return list(self._available_models.values())[0]
+        return None
 
     # ============================================================
     # AI Generation / AI生成
@@ -1539,6 +1722,10 @@ verbose = false
                 is_holiday=is_holiday,
                 holiday_name=holiday,
                 health_status=self._state.health_status.value,
+                illness_name=self._state.illness_name,
+                illness_reason=self._state.illness_reason,
+                illness_symptoms=self._state.illness_symptoms,
+                illness_treatment=self._state.illness_treatment,
                 fatigue_level=self._state.fatigue,
                 hunger_level=self._state.hunger,
                 personality=personality,
@@ -1553,7 +1740,7 @@ verbose = false
                 return []
 
             temperature = self.get_config("ai.temperature", 0.7)
-            max_tokens = self.get_config("ai.max_tokens", 1000)
+            max_tokens = self.get_config("ai.max_tokens", 2500)
 
             success, response, reasoning, model_used = await llm_api.generate_with_model(
                 prompt=prompt,
@@ -1612,24 +1799,35 @@ verbose = false
                         current_time_minutes = current_hour * 60 + current_minute
 
                         # 查找当前时间对应的活动 / Find activity for current time
-                        for activity in schedule:
-                            activity_time = activity.get("time", "")
-                            if ":" in activity_time:
+                        # 使用与 _get_current_schedule_activity 相同的逻辑 / Use same logic as _get_current_schedule_activity
+                        sorted_schedule = sorted(schedule, key=lambda x: x.get("start_time", ""))
+                        current_activity_obj = None
+                        for activity in sorted_schedule:
+                            start_time_str = activity.get("start_time", "")
+                            end_time_str = activity.get("end_time", "")
+                            if ":" in start_time_str and ":" in end_time_str:
                                 try:
-                                    hour, minute = map(int, activity_time.split(":"))
-                                    activity_time_minutes = hour * 60 + minute
+                                    start_hour, start_minute = map(int, start_time_str.split(":"))
+                                    end_hour, end_minute = map(int, end_time_str.split(":"))
+                                    start_time_minutes = start_hour * 60 + start_minute
+                                    end_time_minutes = end_hour * 60 + end_minute
 
-                                    # 如果当前时间在活动时间前后5分钟内，设置当前活动
-                                    # If current time is within 5 minutes of activity time, set current activity
-                                    if abs(current_time_minutes - activity_time_minutes) <= 5:
-                                        async with self._state_lock:
-                                            self._state.current_activity = activity.get("activity_type", "idle")
-                                            self._state.current_activity_description = activity.get("description", "")
-                                            self._state.last_activity_time = time.time()
-                                        logger.info(f"Set current activity based on schedule: {self._state.current_activity} at {activity_time}")
+                                    # 判断当前时间是否在时间段内 / Check if current time is within time slot
+                                    if start_time_minutes <= current_time_minutes < end_time_minutes:
+                                        current_activity_obj = activity
                                         break
                                 except (ValueError, IndexError) as e:
-                                    logger.warning(f"Failed to parse activity time {activity_time}: {e}")
+                                    logger.warning(f"Failed to parse activity time {start_time_str}-{end_time_str}: {e}")
+
+                        # 设置当前活动 / Set current activity
+                        if current_activity_obj:
+                            async with self._state_lock:
+                                self._state.current_activity = current_activity_obj.get("activity_type", "idle")
+                                self._state.current_activity_description = current_activity_obj.get("description", "")
+                                self._state.last_activity_time = time.time()
+                            logger.info(f"Set current activity based on schedule: {self._state.current_activity} at {current_activity_obj.get('time', '')}")
+                        else:
+                            logger.warning("No matching activity found after schedule generation")
                     except Exception as e:
                         logger.warning(f"Failed to check current time for schedule: {e}")
 
@@ -1642,8 +1840,14 @@ verbose = false
 
         return []
 
-    async def _generate_random_event(self) -> Optional[Dict[str, Any]]:
-        """生成随机事件 / Generate random event"""
+    async def _generate_random_event(self, check_probability: bool = True) -> Optional[Dict[str, Any]]:
+        """生成随机事件 / Generate random event
+        
+        Args:
+            check_probability: 是否检查事件概率 / Whether to check event probability
+                              True: 正常模式，根据概率决定是否触发
+                              False: 强制模式，忽略概率检查（用于调试命令）
+        """
         try:
             now = await self._time_api.get_current_time()
             date_str = now.strftime("%Y-%m-%d")
@@ -1678,7 +1882,7 @@ verbose = false
                 return None
 
             temperature = self.get_config("ai.temperature", 0.7)
-            max_tokens = self.get_config("ai.max_tokens", 1000)
+            max_tokens = self.get_config("ai.max_tokens", 2500)
 
             success, response, reasoning, model_used = await llm_api.generate_with_model(
                 prompt=prompt,
@@ -1724,10 +1928,17 @@ verbose = false
                         logger.error(f"Failed to parse event JSON even after fixing commas: {e2}")
                         return None
                 if isinstance(event, dict):
-                    # Check probability / 检查概率
-                    probability = event.get("probability", 0.0)
-                    if random.random() < probability:
-                        logger.info(f"Generated random event: {event.get('event_name')}")
+                    # Check probability / 检查概率（仅在正常模式下）
+                    if check_probability:
+                        probability = event.get("probability", 0.0)
+                        if random.random() < probability:
+                            logger.info(f"Generated random event: {event.get('event_name')}")
+                            return event
+                        else:
+                            logger.debug(f"Event generated but probability check failed (probability: {probability})")
+                    else:
+                        # 强制模式，忽略概率检查
+                        logger.info(f"Generated random event (forced): {event.get('event_name')}")
                         return event
             except json.JSONDecodeError:
                 logger.error(f"Failed to parse event JSON: {response}")
@@ -1834,6 +2045,118 @@ verbose = false
             logger.error(f"Failed to judge emotion: {e}", exc_info=True)
 
         return "calm", 0, ""
+
+    async def _diagnose_illness(self) -> bool:
+        """诊断疾病 / Diagnose illness"""
+        try:
+            # 如果健康状态是健康的，清除疾病信息
+            if self._state.health_status == HealthStatus.HEALTHY:
+                async with self._state_lock:
+                    self._state.illness_name = ""
+                    self._state.illness_reason = ""
+                    self._state.illness_symptoms = ""
+                    self._state.illness_treatment = ""
+                logger.info("Health status is healthy, cleared illness information")
+                return True
+
+            now = await self._time_api.get_current_time()
+            date_str = now.strftime("%Y-%m-%d")
+            time_str = now.strftime("%H:%M")
+
+            # Get personality / 获取人格
+            personality = self._get_personality()
+
+            # Get habits / 获取习惯
+            habits_text = await self._get_habits_text()
+
+            # Build prompt / 构建提示词
+            prompt = self._get_prompt(
+                "illness_diagnosis",
+                current_time=time_str,
+                current_date=date_str,
+                health_status=self._state.health_status.value,
+                fatigue_level=self._state.fatigue,
+                hunger_level=self._state.hunger,
+                current_emotion=self._state.current_emotion,
+                personality=personality,
+                habits=habits_text
+            )
+
+            # Call LLM / 调用LLM
+            model_name = self.get_config("ai.emotion_model", "planner")
+            model_config = self._get_model_config(model_name)
+            if not model_config:
+                logger.error(f"Model config not found for {model_name}")
+                return False
+
+            temperature = self.get_config("ai.temperature", 0.7)
+            max_tokens = self.get_config("ai.max_tokens", 500)
+
+            success, response, reasoning, model_used = await llm_api.generate_with_model(
+                prompt=prompt,
+                model_config=model_config,
+                temperature=temperature,
+                max_tokens=max_tokens
+            )
+
+            if not success:
+                logger.error(f"Failed to diagnose illness: {response}")
+                return False
+
+            # Parse response / 解析响应
+            try:
+                # 移除 markdown 代码块标记 / Remove markdown code block markers
+                cleaned_response = response.strip()
+                if cleaned_response.startswith("```json"):
+                    cleaned_response = cleaned_response[7:]
+                elif cleaned_response.startswith("```"):
+                    cleaned_response = cleaned_response[3:]
+                if cleaned_response.endswith("```"):
+                    cleaned_response = cleaned_response[:-3]
+                cleaned_response = cleaned_response.strip()
+
+                # 替换中文引号为英文引号，避免 JSON 解析错误
+                cleaned_response = cleaned_response.replace('"', '"').replace('"', '"')
+                cleaned_response = cleaned_response.replace(''', "'").replace(''', "'")
+
+                # 尝试解析 JSON
+                try:
+                    illness_data = json.loads(cleaned_response)
+                except json.JSONDecodeError as e:
+                    logger.error(f"Failed to parse illness JSON after cleaning: {e}")
+                    logger.error(f"Cleaned response (first 1000 chars): {cleaned_response[:1000] if cleaned_response else 'empty'}")
+                    logger.error(f"Original response (first 1000 chars): {response[:1000] if response else 'empty'}")
+                    # 尝试修复常见的 JSON 错误
+                    try:
+                        cleaned_response = cleaned_response.replace(',\n}', '\n}').replace(',\n]', '\n]')
+                        cleaned_response = cleaned_response.replace(', }', '}').replace(', ]', ']')
+                        illness_data = json.loads(cleaned_response)
+                        logger.info("Successfully parsed illness JSON after fixing trailing commas")
+                    except json.JSONDecodeError as e2:
+                        logger.error(f"Failed to parse illness JSON even after fixing commas: {e2}")
+                        return False
+
+                if isinstance(illness_data, dict):
+                    illness_name = illness_data.get("illness_name", "")
+                    illness_reason = illness_data.get("illness_reason", "")
+                    illness_symptoms = illness_data.get("illness_symptoms", "")
+                    illness_treatment = illness_data.get("illness_treatment", "")
+
+                    async with self._state_lock:
+                        self._state.illness_name = illness_name
+                        self._state.illness_reason = illness_reason
+                        self._state.illness_symptoms = illness_symptoms
+                        self._state.illness_treatment = illness_treatment
+
+                    logger.info(f"Diagnosed illness: {illness_name}, reason: {illness_reason}")
+                    return True
+            except json.JSONDecodeError:
+                logger.error(f"Failed to parse illness JSON: {response}")
+
+        except Exception as e:
+            logger.error(f"Failed to diagnose illness: {e}", exc_info=True)
+
+        return False
 
     async def _generate_habits(self) -> bool:
         """生成习惯 / Generate habits"""
@@ -2081,6 +2404,40 @@ verbose = false
     # State Management / 状态管理
     # ============================================================
 
+    async def _update_current_activity(self):
+        """更新当前活动 / Update current activity
+        
+        这个方法定期更新当前活动，确保日程和睡眠状态能够正确同步。
+        This method periodically updates current activity, ensuring schedule and sleep state are properly synchronized.
+        """
+        try:
+            current_time = await self._time_api.get_current_time()
+            
+            # 使用改进的活动匹配逻辑 / Use improved activity matching logic
+            current_activity_obj = await self._get_current_schedule_activity(current_time)
+            
+            if current_activity_obj:
+                new_activity = current_activity_obj.get("activity_type", "idle")
+                new_description = current_activity_obj.get("description", "")
+                
+                async with self._state_lock:
+                    # 如果活动类型发生变化，更新当前活动
+                    if self._state.current_activity != new_activity:
+                        logger.info(f"Current activity changed: {self._state.current_activity} -> {new_activity}")
+                        self._state.current_activity = new_activity
+                        self._state.current_activity_description = new_description
+                        self._state.last_activity_time = time.time()
+            else:
+                # 没有找到匹配的活动，设置为空闲
+                async with self._state_lock:
+                    if self._state.current_activity != "idle":
+                        logger.info("No matching activity found, setting to idle")
+                        self._state.current_activity = "idle"
+                        self._state.current_activity_description = ""
+                        self._state.last_activity_time = time.time()
+        except Exception as e:
+            logger.error(f"Failed to update current activity: {e}", exc_info=True)
+
     async def _update_states(self):
         """更新状态 / Update states"""
         async with self._state_lock:
@@ -2095,6 +2452,9 @@ verbose = false
         regenerate_daily = self.get_config("schedule.regenerate_daily", True)
         if regenerate_daily and self._state.schedule_generated_date != date_str:
             await self._generate_schedule()
+
+        # Update current activity based on schedule / 根据日程更新当前活动
+        await self._update_current_activity()
 
         # Update sleep state based on schedule and fatigue / 根据日程和疲劳度更新睡眠状态
         await self._update_sleep_state()
@@ -2111,6 +2471,52 @@ verbose = false
 
         async with self._state_lock:
             self._state.last_update = current_time.timestamp()
+
+    async def _get_current_schedule_activity(self, current_time: datetime) -> Optional[Dict[str, Any]]:
+        """获取当前时间的日程活动 / Get current schedule activity for current time
+        
+        这个方法改进了活动匹配逻辑，支持时间段匹配而非仅时间点匹配。
+        This method improves activity matching logic, supporting time range matching instead of just time point matching.
+        
+        Args:
+            current_time: 当前时间 / Current time
+            
+        Returns:
+            当前活动字典，如果没有找到则返回 None / Current activity dictionary, or None if not found
+        """
+        schedule = self._state.schedule
+        if not schedule:
+            return None
+
+        current_hour = current_time.hour
+        current_minute = current_time.minute
+        current_time_minutes = current_hour * 60 + current_minute
+
+        # 将日程按时间排序 / Sort schedule by time
+        sorted_schedule = sorted(schedule, key=lambda x: x.get("start_time", ""))
+
+        # 查找当前时间对应的活动 / Find activity for current time
+        # 使用时间段匹配逻辑：找到当前时间所在的时间段
+        # Use time range matching logic: find the time slot containing current time
+        current_activity = None
+        for i, activity in enumerate(sorted_schedule):
+            start_time_str = activity.get("start_time", "")
+            end_time_str = activity.get("end_time", "")
+            if ":" in start_time_str and ":" in end_time_str:
+                try:
+                    start_hour, start_minute = map(int, start_time_str.split(":"))
+                    end_hour, end_minute = map(int, end_time_str.split(":"))
+                    start_time_minutes = start_hour * 60 + start_minute
+                    end_time_minutes = end_hour * 60 + end_minute
+
+                    # 判断当前时间是否在时间段内 / Check if current time is within time slot
+                    if start_time_minutes <= current_time_minutes < end_time_minutes:
+                        current_activity = activity
+                        break
+                except (ValueError, IndexError):
+                    pass
+
+        return current_activity
 
     async def _update_sleep_state(self):
         """更新睡眠状态 / Update sleep state"""
@@ -2129,33 +2535,47 @@ verbose = false
                 current_activity = self._state.current_activity
                 schedule = self._state.schedule
 
-                # 查找当前时间的日程活动 / Find schedule activity for current time
-                schedule_activity = None
-                for activity in schedule:
-                    activity_time = activity.get("time", "")
-                    if ":" in activity_time:
-                        try:
-                            hour, minute = map(int, activity_time.split(":"))
-                            activity_time_minutes = hour * 60 + minute
-
-                            # 如果当前时间在活动时间前后5分钟内
-                            if abs(current_time_minutes - activity_time_minutes) <= 5:
-                                schedule_activity = activity.get("activity_type", "")
-                                break
-                        except (ValueError, IndexError):
-                            pass
+                # 使用改进的活动匹配逻辑 / Use improved activity matching logic
+                schedule_activity_obj = await self._get_current_schedule_activity(current_time)
+                schedule_activity = schedule_activity_obj.get("activity_type", "") if schedule_activity_obj else ""
 
                 # 日程联动：如果当前日程为睡眠活动，进入睡眠状态 / Schedule integration: sleep if current activity is sleep
                 if schedule_activity == "sleep":
+                    # 如果当前是清醒状态，进入睡眠
                     if self._state.sleep_state == SleepState.AWAKE:
                         logger.info("Schedule activity is sleep, entering sleep state")
                         self._state.sleep_state = SleepState.FALLING_ASLEEP
                         self._state.last_sleep_time = current_time.timestamp()
+                    # 如果当前是困倦状态，进入睡眠
+                    elif self._state.sleep_state == SleepState.SLEEPY:
+                        logger.info("Schedule activity is sleep, entering sleep state from sleepy")
+                        self._state.sleep_state = SleepState.FALLING_ASLEEP
+                        self._state.last_sleep_time = current_time.timestamp()
                 else:
                     # 日程切换：如果当前日程不是睡眠活动，从睡眠中醒来 / Schedule change: wake up if current activity is not sleep
-                    if self._state.sleep_state in [SleepState.LIGHT_SLEEP, SleepState.DEEP_SLEEP]:
-                        logger.info(f"Schedule changed from sleep to {schedule_activity}, waking up")
-                        self._state.sleep_state = SleepState.WAKING_UP
+                    if self._state.sleep_state in [SleepState.LIGHT_SLEEP, SleepState.DEEP_SLEEP, SleepState.FALLING_ASLEEP]:
+                        # 检查是否满足最小睡眠时长
+                        if self._state.last_sleep_time > 0:
+                            sleep_duration_hours = (current_time.timestamp() - self._state.last_sleep_time) / 3600
+                            min_sleep_hours = self.get_config("sleep.min_sleep_hours", 4)
+                            
+                            # 如果满足最小睡眠时长，可以醒来
+                            if sleep_duration_hours >= min_sleep_hours:
+                                logger.info(f"Schedule changed from sleep to {schedule_activity}, waking up (slept for {sleep_duration_hours:.1f} hours)")
+                                self._state.sleep_state = SleepState.WAKING_UP
+                                self._state.last_wake_time = current_time.timestamp()
+                            else:
+                                # 还没睡够，继续睡
+                                logger.debug(f"Schedule changed but minimum sleep duration not reached ({sleep_duration_hours:.1f} < {min_sleep_hours} hours), continuing sleep")
+                        else:
+                            # 没有睡眠时间记录，直接醒来
+                            logger.info(f"Schedule changed from sleep to {schedule_activity}, waking up (no sleep time recorded)")
+                            self._state.sleep_state = SleepState.WAKING_UP
+                            self._state.last_wake_time = current_time.timestamp()
+                    elif self._state.sleep_state == SleepState.WAKING_UP:
+                        # 已经是醒来中状态，直接变为清醒
+                        logger.info(f"Already in waking_up state, transitioning to awake (current activity: {schedule_activity})")
+                        self._state.sleep_state = SleepState.AWAKE
                         self._state.last_wake_time = current_time.timestamp()
 
                 # 根据疲劳度判断是否应该入睡 / Check if should sleep based on fatigue
@@ -2224,18 +2644,30 @@ verbose = false
                             logger.info(f"Min sleep duration reached and fatigue recovered, waking up from deep sleep")
                             self._state.sleep_state = SleepState.WAKING_UP
 
-                elif self._state.sleep_state == SleepState.WAKING_UP:
-                    # 醒来中，变为清醒
-                    self._state.sleep_state = SleepState.AWAKE
-                    self._state.last_wake_time = current_time.timestamp()
-                    logger.info("Woke up, now awake")
-
         except Exception as e:
             logger.error(f"Failed to update sleep state: {e}", exc_info=True)
 
     async def _handle_event(self, event: Dict[str, Any]):
         """处理事件 / Handle event"""
         try:
+            # 记录事件 / Record event
+            async with self._state_lock:
+                self._state.recent_event = event
+                self._state.recent_event_time = time.time()
+            logger.info(f"[EVENT] Recorded recent event: {event.get('event_name')}")
+
+            # 保存当前活动 / Save current activity
+            async with self._state_lock:
+                previous_activity = self._state.current_activity
+                previous_activity_description = self._state.current_activity_description
+
+            # 临时改变当前活动为处理随机事件 / Temporarily change current activity to handling event
+            event_name = event.get("event_name", "随机事件")
+            async with self._state_lock:
+                self._state.current_activity = "handling_event"
+                self._state.current_activity_description = f"正在处理随机事件：{event_name}"
+            logger.info(f"[EVENT] Changed activity from {previous_activity} to handling_event")
+            
             # Apply impacts / 应用影响
             health_impact = event.get("health_impact", 0)
             fatigue_impact = event.get("fatigue_impact", 0)
@@ -2268,6 +2700,9 @@ verbose = false
             if old_health_status != new_health_status:
                 logger.info(f"Health status changed: {old_health_status.value} -> {new_health_status.value}")
 
+                # 诊断疾病 / Diagnose illness
+                await self._diagnose_illness()
+
                 # If became ill, regenerate schedule based on new health status
                 # 如果生病了，根据新的健康状态重新生成日程
                 if new_health_status != HealthStatus.HEALTHY:
@@ -2280,6 +2715,16 @@ verbose = false
                     await self._generate_schedule()
 
             logger.info(f"Handled event: {event.get('event_name')}, impacts: health={health_impact}, fatigue={fatigue_impact}, hunger={hunger_impact}, emotion={emotion_impact}")
+
+            # 恢复原来的活动 / Restore previous activity
+            # 事件处理完成后，恢复到原来的日程活动
+            async with self._state_lock:
+                self._state.current_activity = previous_activity
+                self._state.current_activity_description = previous_activity_description
+            logger.info(f"[EVENT] Restored activity to: {previous_activity}")
+            
+            # 保存状态以包含最近事件信息 / Save state to include recent event info
+            await self._save_state()
         except Exception as e:
             logger.error(f"Failed to handle event: {e}", exc_info=True)
 
@@ -2377,12 +2822,38 @@ class MessageEventHandler(BaseEventHandler):
         # Slight increase in fatigue and hunger on message with probability
         # 消息时按概率略微增加疲劳度和饥饿度
         import random
-
+        
         update_probability = _plugin_instance.get_config("state.message_state_update_probability", 0.7)
         if random.random() < update_probability:
+            # 每次消息增加2-5点疲劳和饥饿值 / Increase 2-5 points of fatigue and hunger per message
+            fatigue_increase = random.randint(2, 5)
+            hunger_increase = random.randint(2, 5)
             async with _plugin_instance._state_lock:
-                _plugin_instance._state.fatigue = min(100, _plugin_instance._state.fatigue + 1)
-                _plugin_instance._state.hunger = min(100, _plugin_instance._state.hunger + 1)
+                _plugin_instance._state.fatigue = min(100, _plugin_instance._state.fatigue + fatigue_increase)
+                _plugin_instance._state.hunger = min(100, _plugin_instance._state.hunger + hunger_increase)
+                logger.debug(f"[STATE] Message received: fatigue +{fatigue_increase} -> {_plugin_instance._state.fatigue}, hunger +{hunger_increase} -> {_plugin_instance._state.hunger}")
+
+        # Check if current activity requires hands-on work (reduces reply probability)
+        # 检查当前活动是否需要动手操作（降低回复概率）
+        reply_reduction_enabled = _plugin_instance.get_config("reply_reduction.enabled", True)
+        if reply_reduction_enabled:
+            reduction_activities_str = _plugin_instance.get_config("reply_reduction.reduction_activities", "work,study,exercise,medical")
+            reduction_activities = [activity.strip().lower() for activity in reduction_activities_str.split(",") if activity.strip()]
+            reduction_factor = _plugin_instance.get_config("reply_reduction.reduction_factor", 0.5)
+
+            current_activity_type = _plugin_instance._state.current_activity.lower()
+            if current_activity_type in reduction_activities:
+                # Calculate actual reply probability reduction
+                # 计算实际回复概率降低
+                actual_reduction = min(1.0, max(0.0, reduction_factor))
+                logger.debug(f"[REPLY_REDUCTION] Current activity '{current_activity_type}' requires hands-on work, reducing reply probability by {actual_reduction * 100:.0f}%")
+
+                # Store reduction factor in message additional_data for downstream processing
+                # 将降低因子存储在消息的additional_data中，供下游处理使用
+                if not message.additional_data:
+                    message.additional_data = {}
+                message.additional_data["reply_reduction_factor"] = actual_reduction
+                message.additional_data["reply_reduction_reason"] = f"当前活动'{current_activity_type}'需要动手操作"
 
         return True, True, None, None, None
 
@@ -2401,6 +2872,32 @@ class SocialNetworkEventHandler(BaseEventHandler):
 
         # 检查是否启用社交网络 / Check if social network is enabled
         if not _plugin_instance._social_network or not _plugin_instance._social_network.is_enabled():
+            return True, True, None, None, None
+
+        # 检查是否处于睡眠状态 / Check if in sleep state
+        # 睡眠期间不记录互动，避免增加亲密度
+        sleep_state = _plugin_instance._state.sleep_state
+        if sleep_state not in [SleepState.AWAKE, SleepState.SLEEPY]:
+            logger.debug(f"[SOCIAL] Skipping interaction recording during sleep state: {sleep_state.value}")
+            return True, True, None, None, None
+
+        # 检查是否为 notice 消息 / Check if it's a notice message
+        # notice 消息（如群消息撤回通知）不应该触发社交互动记录
+        sub_type = message.message_base_info.get("sub_type", "") if hasattr(message, 'message_base_info') else ""
+        if sub_type:
+            logger.debug(f"[SOCIAL] Skipping notice message with sub_type: {sub_type}")
+            return True, True, None, None, None
+
+        # 检查是否是与bot的对话 / Check if message is directed to bot
+        # 只有在以下情况下才记录互动和判定亲密度：
+        # 1. 私聊消息（所有私聊都是与bot的对话）
+        # 2. 群聊中@了bot或提及了bot
+        is_mentioned = getattr(message, "is_mentioned", False)
+        is_at = getattr(message, "is_at", False)
+        is_private = message.is_private_message
+        
+        if not is_private and not is_mentioned and not is_at:
+            logger.debug(f"[SOCIAL] Skipping message not directed to bot (not private, not mentioned, not at)")
             return True, True, None, None, None
 
         try:
@@ -2433,6 +2930,7 @@ class MessageSleepEventHandler(BaseEventHandler):
     handler_name = "life_simulation_sleep"
     handler_description = "Handle sleep state and block messages during sleep / 处理睡眠状态，睡眠期间拦截消息"
     weight = 100  # 高优先级，在其他处理器之前执行
+    intercept_message = True  # 标记为消息拦截类型处理器
 
     async def execute(self, message: MaiMessages | None) -> Tuple[bool, bool, Optional[str], None, None]:
         if not _plugin_instance or not message:
@@ -2443,14 +2941,70 @@ class MessageSleepEventHandler(BaseEventHandler):
         if not sleep_enabled:
             return True, True, None, None, None
 
+        # 检查是否是 Dream 功能发送的消息 / Check if message is from Dream system
+        # Dream 功能通常使用特定的发送者ID或消息类型
+        is_dream_message = False
+        if hasattr(message, 'self_id'):
+            # 检查发送者ID是否为机器人自己（Dream系统通常以机器人身份发送）
+            sender_id = str(message.sender_id) if hasattr(message, 'sender_id') else ""
+            bot_id = message.self_id
+            if sender_id == bot_id:
+                # 是机器人自己发送的消息，可能是Dream系统
+                is_dream_message = True
+                logger.debug(f"[SLEEP] Message from bot (possibly Dream), allowing through")
+
+        # 如果是 Dream 消息，不拦截 / If Dream message, don't intercept
+        if is_dream_message:
+            return True, True, None, None, None
+
         # 检查当前睡眠状态 / Check current sleep state
         sleep_state = _plugin_instance._state.sleep_state
 
-        # 如果清醒，正常处理 / If awake, process normally
-        if sleep_state == SleepState.AWAKE:
+        # 如果清醒或困倦，检查日程是否需要进入睡眠 / If awake or sleepy, check if schedule requires sleep
+        if sleep_state in [SleepState.AWAKE, SleepState.SLEEPY]:
+            # 检查当前日程活动是否为睡眠 / Check if current schedule activity is sleep
+            current_time = await _plugin_instance._time_api.get_current_time()
+            schedule = _plugin_instance._state.schedule
+            
+            if schedule:
+                current_hour = current_time.hour
+                current_minute = current_time.minute
+                current_time_minutes = current_hour * 60 + current_minute
+                
+                # 查找当前时间的日程活动 / Find schedule activity for current time
+                for activity in schedule:
+                    start_time_str = activity.get("start_time", "")
+                    end_time_str = activity.get("end_time", "")
+                    if ":" in start_time_str and ":" in end_time_str:
+                        try:
+                            start_hour, start_minute = map(int, start_time_str.split(":"))
+                            end_hour, end_minute = map(int, end_time_str.split(":"))
+                            start_time_minutes = start_hour * 60 + start_minute
+                            end_time_minutes = end_hour * 60 + end_minute
+                            
+                            # 如果当前时间在睡眠活动的时间段内 / If current time is within sleep activity time slot
+                            if start_time_minutes <= current_time_minutes < end_time_minutes:
+                                activity_type = activity.get("activity_type", "")
+                                if activity_type == "sleep":
+                                    # 日程是睡眠活动，触发进入睡眠 / Schedule is sleep activity, trigger sleep
+                                    logger.info(f"[SCHEDULE] Current activity is sleep, triggering sleep state")
+                                    await _plugin_instance._enter_sleep_state()
+                                    break
+                        except (ValueError, IndexError) as e:
+                            logger.warning(f"[SCHEDULE] Failed to parse activity time {start_time_str}-{end_time_str}: {e}")
+            
+            # 如果已经是睡眠状态，拦截消息 / If already sleeping, intercept message
+            sleep_state = _plugin_instance._state.sleep_state
+            if sleep_state not in [SleepState.AWAKE, SleepState.SLEEPY]:
+                return self._handle_sleep_message(message, sleep_state)
+            
             return True, True, None, None, None
 
-        # 如果在睡眠状态，处理消息 / If sleeping, handle message
+        # 如果在睡眠状态（falling_asleep, light_sleep, deep_sleep, waking_up），拦截消息 / If sleeping, intercept message
+        return self._handle_sleep_message(message, sleep_state)
+    
+    def _handle_sleep_message(self, message: MaiMessages | None, sleep_state: SleepState) -> Tuple[bool, bool, Optional[str], None, None]:
+        """处理睡眠期间的消息 / Handle message during sleep"""
         try:
             # 获取发送者信息 / Get sender information
             user_id = str(message.sender_id) if hasattr(message, 'sender_id') else ""
@@ -2458,15 +3012,11 @@ class MessageSleepEventHandler(BaseEventHandler):
             message_content = message.plain_text if hasattr(message, 'plain_text') else ""
 
             # 记录睡眠期间的消息 / Log messages during sleep
-            logger.debug(f"Received message during sleep (state: {sleep_state.value}) from {user_name}")
-
-            # 检查是否应该回复 / Check if should reply
-            should_reply = False
-            reply_message = None
+            logger.debug(f"[SLEEP] Received message during sleep (state: {sleep_state.value}) from {user_name}")
 
             # 检查打扰唤醒 / Check disturbance wake-up
             disturbance_enabled = _plugin_instance.get_config("sleep.disturbance_enabled", True)
-            if disturbance_enabled:
+            if disturbance_enabled and sleep_state == SleepState.LIGHT_SLEEP:
                 # 检查消息频率 / Check message frequency
                 message_freq_threshold = _plugin_instance.get_config("sleep.message_freq_threshold", 3)
                 # 这里简化处理，实际应该记录最近的消息
@@ -2478,87 +3028,25 @@ class MessageSleepEventHandler(BaseEventHandler):
                     relationship = _plugin_instance._social_network.get_relationship(user_id)
                     if relationship and relationship.intimacy > intimacy_wake_threshold:
                         # 关系亲密，可能唤醒 / High intimacy, may wake up
-                        pass
+                        logger.info(f"[SLEEP] High intimacy user ({relationship.intimacy}), may wake up")
+                        # 可以在这里触发唤醒逻辑
+                        # Can trigger wake-up logic here
 
                 # 检查紧急关键词 / Check emergency keywords
-                emergency_keywords = ["紧急", "救命", "快点", "重要", "急事"]
+                emergency_keywords_str = _plugin_instance.get_config("sleep.emergency_keywords", "紧急,救命,快点,重要,急事")
+                emergency_keywords = [kw.strip() for kw in emergency_keywords_str.split(",") if kw.strip()]
                 if any(keyword in message_content for keyword in emergency_keywords):
-                    logger.info(f"Emergency keyword detected, may wake up")
+                    logger.info(f"[SLEEP] Emergency keyword detected, may wake up")
                     # 可以在这里触发唤醒逻辑
                     # Can trigger wake-up logic here
 
-            # 检查AI自动回复 / Check AI auto-reply
-            ai_reply_enabled = _plugin_instance.get_config("sleep.ai_reply_enabled", True)
-            if ai_reply_enabled:
-                # 使用AI判断是否回复 / Use AI to judge if should reply
-                ai_reply_probability = _plugin_instance.get_config("sleep.ai_reply_probability", 0.3)
-                import random
-
-                if random.random() < ai_reply_probability:
-                    # AI判断是否回复 / AI judges if should reply
-                    try:
-                        # 构建提示词 / Build prompt
-                        sleep_duration = int((time.time() - _plugin_instance._state.last_sleep_time) / 60) if _plugin_instance._state.last_sleep_time > 0 else 0
-                        prompt = _plugin_instance._get_prompt(
-                            "sleep_reply_judgment",
-                            sleep_state=sleep_state.value,
-                            sleep_duration=sleep_duration,
-                            message_count=1,  # 简化处理 / Simplified
-                            user_name=user_name,
-                            message_content=message_content[:200]
-                        )
-
-                        # 调用LLM / Call LLM
-                        ai_model = _plugin_instance.get_config("sleep.ai_model", "replyer")
-                        model_config = _plugin_instance._get_model_config(ai_model)
-                        if model_config:
-                            temperature = _plugin_instance.get_config("ai.temperature", 0.7)
-                            max_tokens = _plugin_instance.get_config("ai.max_tokens", 200)
-
-                            success, response, reasoning, model_used = await llm_api.generate_with_model(
-                                prompt=prompt,
-                                model_config=model_config,
-                                temperature=temperature,
-                                max_tokens=max_tokens
-                            )
-
-                            if success:
-                                # 解析AI响应 / Parse AI response
-                                response = response.strip()
-                                if response.lower() in ["yes", "是", "true"]:
-                                    should_reply = True
-                                    # 获取回复内容 / Get reply content
-                                    # 这里简化处理，实际应该解析完整的JSON响应
-                                    # Simplified here, should actually parse complete JSON response
-                                    reply_message = _plugin_instance.get_config("sleep.sleep_reply", "我现在在睡觉，明天再聊~")
-                                else:
-                                    should_reply = False
-                    except Exception as e:
-                        logger.error(f"Error in AI sleep reply judgment: {e}")
-
-            # 如果AI不回复，使用默认回复 / If AI doesn't reply, use default reply
-            if should_reply and not reply_message:
-                reply_message = _plugin_instance.get_config("sleep.sleep_reply", "我现在在睡觉，明天再聊~")
-
-            # 如果应该回复，发送回复 / If should reply, send reply
-            if should_reply and reply_message:
-                try:
-                    await send_api.send_text(
-                        message.chat_id,
-                        reply_message,
-                        reply_message_id=message.message_id if hasattr(message, 'message_id') else None
-                    )
-                    logger.info(f"Sent sleep reply to {user_name}: {reply_message}")
-                except Exception as e:
-                    logger.error(f"Error sending sleep reply: {e}")
-
-            # 返回 false 阻止后续处理 / Return false to block further processing
-            return False, False, None, None, None
+            # 返回 true (执行成功), false (拦截消息), 阻止后续处理 / Return true (success), false (intercept), block further processing
+            return True, False, "睡眠中，消息已拦截", None, None
 
         except Exception as e:
-            logger.error(f"Error in sleep event handler: {e}", exc_info=True)
-            # 出错时也阻止处理 / Block processing on error
-            return False, False, None, None, None
+            logger.error(f"[SLEEP] Error in sleep event handler: {e}", exc_info=True)
+            # 出错时也拦截处理 / Block processing on error
+            return True, False, "睡眠处理异常，消息已拦截", None, None
 
 
 # ============================================================
@@ -2685,7 +3173,7 @@ class StatusCommand(BaseCommand):
 🍔 饥饿度: {state['hunger']}/100
 ❤️ 健康度: {state['health']}/100 ({state['health_status']})
 😊 情绪: {state['current_emotion']} ({state['emotion_intensity']}/100)
-🏃 当前活动: {state['current_activity']} - {state['current_activity_description']}
+🏃 当前活动: {state['current_activity_description'] if state['current_activity_description'] else state['current_activity']}
 🎉 节日: {state['current_holiday'] if state['current_holiday'] else '无'}"""
 
             await self.send_text(status_msg, storage_message=False)
@@ -2720,11 +3208,13 @@ class ScheduleCommand(BaseCommand):
             if schedule:
                 schedule_msg = f"📅 日程安排 ({state['schedule_generated_date']}):\n\n"
                 for item in schedule:
-                    time_str = item.get("time", "")
-                    activity = item.get("activity", "")
+                    start_time_str = item.get("start_time", "")
+                    end_time_str = item.get("end_time", "")
+                    activity = item.get("activity_type", "")
                     description = item.get("description", "")
                     priority = item.get("priority", 0)
-                    schedule_msg += f"⏰ {time_str} - {activity} ({description}) [优先级: {priority}]\n"
+                    time_range = f"{start_time_str}-{end_time_str}" if start_time_str and end_time_str else start_time_str
+                    schedule_msg += f"⏰ {time_range} - {activity} ({description}) [优先级: {priority}]\n"
             else:
                 schedule_msg = "📅 日程安排: 暂无日程"
 
@@ -2753,9 +3243,9 @@ class SocialNetworkCommand(BaseCommand):
             return False, None, 0
 
         try:
-            args = self.get_args()
-            action = args.get("action", "list")
-            user_id = args.get("user_id", "")
+            # 从正则匹配组中获取参数
+            action = self.matched_groups.get("action", "list")
+            user_id = self.matched_groups.get("user_id", "")
 
             if not _plugin_instance._social_network or not _plugin_instance._social_network.is_enabled():
                 await self.send_text("社交网络功能未启用", storage_message=False)
@@ -2875,6 +3365,20 @@ class GetStatusTool(BaseTool):
             }.get(health_status, health_status)
             status_lines.append(f"❤️ 健康度: {health}/100 ({health_status_cn})")
 
+            # 疾病信息 / Illness information
+            illness_name = state.get("illness_name", "")
+            if illness_name:
+                status_lines.append(f"🏥 疾病: {illness_name}")
+                illness_reason = state.get("illness_reason", "")
+                if illness_reason:
+                    status_lines.append(f"📝 原因: {illness_reason}")
+                illness_symptoms = state.get("illness_symptoms", "")
+                if illness_symptoms:
+                    status_lines.append(f"😷 症状: {illness_symptoms}")
+                illness_treatment = state.get("illness_treatment", "")
+                if illness_treatment:
+                    status_lines.append(f"💊 治疗: {illness_treatment}")
+
             # 情绪状态 / Emotion state
             emotion = state.get("current_emotion", "calm")
             emotion_intensity = state.get("emotion_intensity", 0)
@@ -2897,10 +3401,35 @@ class GetStatusTool(BaseTool):
             # 当前活动 / Current activity
             current_activity = state.get("current_activity", "idle")
             current_activity_description = state.get("current_activity_description", "")
-            activity_line = f"🏃 当前活动: {current_activity}"
-            if current_activity_description:
-                activity_line += f" - {current_activity_description}"
+
+            # 从日程中获取详细描述和时间 / Get detailed description and time from schedule
+            detailed_description = current_activity_description
+            current_activity_time = ""
+            schedule = state.get("schedule", [])
+
+            # 尝试从日程中查找当前活动的详细信息 / Try to find detailed info from schedule
+            if schedule:
+                for activity in schedule:
+                    if activity.get("activity_type") == current_activity:
+                        detailed_description = activity.get("description", current_activity_description)
+                        start_time = activity.get("start_time", "")
+                        end_time = activity.get("end_time", "")
+                        if start_time and end_time:
+                            current_activity_time = f"{start_time}-{end_time}"
+                        elif start_time:
+                            current_activity_time = start_time
+                        break
+
+            activity_line = f"🏃 当前活动: {detailed_description if detailed_description else current_activity}"
+            if current_activity_time:
+                activity_line += f" ({current_activity_time})"
             status_lines.append(activity_line)
+
+            # 当前时间 / Current time
+            current_time = datetime.now()
+            current_time_str = current_time.strftime("%H:%M")
+            current_date_str = current_time.strftime("%Y-%m-%d")
+            status_lines.append(f"🕐 当前时间: {current_time_str} ({current_date_str})")
 
             # 节日信息 / Holiday information
             is_holiday = state.get("is_holiday", False)
@@ -3239,23 +3768,67 @@ class GetScheduleTool(BaseTool):
             current_activity_description = state.get("current_activity_description", "")
             schedule_generated_date = state.get("schedule_generated_date", "")
             schedule = state.get("schedule", [])
+            recent_event = state.get("recent_event", {})
+            recent_event_time = state.get("recent_event_time", 0.0)
+
+            # 获取当前活动的时间和详细描述 / Get current activity time and detailed description
+            current_activity_time = ""
+            detailed_description = current_activity_description
+            if schedule:
+                for activity in schedule:
+                    if activity.get("activity_type") == current_activity:
+                        start_time = activity.get("start_time", "")
+                        end_time = activity.get("end_time", "")
+                        if start_time and end_time:
+                            current_activity_time = f"{start_time}-{end_time}"
+                        elif start_time:
+                            current_activity_time = start_time
+                        detailed_description = activity.get("description", current_activity_description)
+                        break
 
             # 构建当前活动信息 / Build current activity info
-            current_info = f"🏃 当前活动: {current_activity}"
-            if current_activity_description:
-                current_info += f" - {current_activity_description}"
+            current_info = f"🏃 当前活动: {detailed_description if detailed_description else current_activity}"
+            if current_activity_time:
+                current_info += f" ({current_activity_time})"
+            
+            # 添加当前时间信息 / Add current time information
+            current_timestamp = time.time()
+            from datetime import datetime
+            current_datetime = datetime.fromtimestamp(current_timestamp)
+            current_time_str = current_datetime.strftime("%H:%M")
+            current_date_str = current_datetime.strftime("%Y-%m-%d")
+            current_info += f"\n🕐 当前时间: {current_time_str} ({current_date_str})"
+
+            # 检查是否有最近的事件 / Check if there's a recent event
+            # 如果事件在最近5分钟内发生，则显示 / Show event if it happened within last 5 minutes
+            if recent_event and recent_event_time > 0:
+                current_timestamp = time.time()
+                time_diff = current_timestamp - recent_event_time
+                logger.debug(f"[SCHEDULE] Recent event found: {recent_event.get('event_name')}, time_diff: {time_diff:.1f}s")
+                if time_diff < 300:  # 5分钟 = 300秒
+                    event_name = recent_event.get("event_name", "未知事件")
+                    event_desc = recent_event.get("event_description", "")
+                    current_info += f"\n💫 最近事件: {event_name}"
+                    if event_desc:
+                        current_info += f" - {event_desc[:100]}"  # 限制描述长度
+                else:
+                    logger.debug(f"[SCHEDULE] Recent event too old: {time_diff:.1f}s > 300s")
+            else:
+                logger.debug(f"[SCHEDULE] No recent event found (event: {bool(recent_event)}, time: {recent_event_time})")
 
             # 构建日程信息 / Build schedule info
             schedule_info = []
             if schedule:
                 schedule_info.append(f"📅 日程安排 ({schedule_generated_date}):")
                 for activity in schedule:
-                    time_str = activity.get("time", "")
+                    start_time_str = activity.get("start_time", "")
+                    end_time_str = activity.get("end_time", "")
                     activity_type = activity.get("activity_type", "")
                     description = activity.get("description", "")
                     priority = activity.get("priority", 0)
 
-                    schedule_info.append(f"⏰ {time_str} - {activity_type}")
+                    time_range = f"{start_time_str}-{end_time_str}" if start_time_str and end_time_str else start_time_str
+                    schedule_info.append(f"⏰ {time_range} - {activity_type}")
                     if description:
                         schedule_info.append(f"   {description}")
                     if priority:
@@ -3279,5 +3852,242 @@ class GetScheduleTool(BaseTool):
             return {
                 "name": self.name,
                 "content": f"获取日程信息失败: {str(e)}",
+                "error": str(e)
+            }
+
+
+class ModifyScheduleItemTool(BaseTool):
+    """修改单个日程活动工具 / Modify Single Schedule Item Tool"""
+
+    name = "modify_schedule_item"
+    description = "【重要工具】修改日程中的单个活动。**使用场景**：1)当用户要求修改某个时间段的活动时；2)当机器人想要调整自己的日程安排时；3)当需要根据实际情况（如临时有事、突发状况）调整日程时。**参数说明**：start_time（开始时间，如\"08:00\"）、end_time（结束时间，如\"09:00\"）、activity_type（活动类型，如\"work\"、\"leisure\"、\"meal\"、\"sleep\"、\"exercise\"、\"study\"、\"other\"、\"rest\"、\"medical\"）、description（活动描述，如\"计划起床洗漱\"）、priority（优先级1-5）。**注意事项**：1)活动描述必须使用计划性用词（如\"计划\"、\"安排\"、\"准备\"、\"将\"、\"打算\"）；2)时间段不能与其他活动重叠；3)修改后需要保持时间段连续；4)修改成功后会返回修改后的日程信息。"
+    parameters = [
+        {
+            "name": "start_time",
+            "type": "string",
+            "description": "开始时间，格式为 HH:MM，如 08:00",
+            "required": True
+        },
+        {
+            "name": "end_time",
+            "type": "string",
+            "description": "结束时间，格式为 HH:MM，如 09:00",
+            "required": True
+        },
+        {
+            "name": "activity_type",
+            "type": "string",
+            "description": "活动类型：work, leisure, meal, sleep, exercise, study, other, rest, medical",
+            "required": True
+        },
+        {
+            "name": "description",
+            "type": "string",
+            "description": "活动描述，必须使用计划性用词（如\"计划\"、\"安排\"、\"准备\"）",
+            "required": True
+        },
+        {
+            "name": "priority",
+            "type": "integer",
+            "description": "优先级，1-5，5最高",
+            "required": False
+        }
+    ]
+    available_for_llm = True
+
+    async def execute(self, function_args: dict[str, Any]) -> dict[str, Any]:
+        """执行工具 / Execute tool"""
+        try:
+            if not _plugin_instance:
+                return {
+                    "name": self.name,
+                    "content": "生活模拟插件未就绪",
+                    "error": "Plugin not ready"
+                }
+
+            # 获取参数 / Get parameters
+            start_time = function_args.get("start_time", "")
+            end_time = function_args.get("end_time", "")
+            activity_type = function_args.get("activity_type", "")
+            description = function_args.get("description", "")
+            priority = function_args.get("priority", 3)
+
+            # 验证参数 / Validate parameters
+            if not start_time or not end_time:
+                return {
+                    "name": self.name,
+                    "content": "请提供开始时间和结束时间",
+                    "error": "Missing time parameters"
+                }
+
+            if not activity_type:
+                return {
+                    "name": self.name,
+                    "content": "请提供活动类型",
+                    "error": "Missing activity type"
+                }
+
+            if not description:
+                return {
+                    "name": self.name,
+                    "content": "请提供活动描述",
+                    "error": "Missing description"
+                }
+
+            # 验证时间格式 / Validate time format
+            try:
+                start_hour, start_minute = map(int, start_time.split(":"))
+                end_hour, end_minute = map(int, end_time.split(":"))
+                
+                if not (0 <= start_hour < 24 and 0 <= start_minute < 60):
+                    return {
+                        "name": self.name,
+                        "content": "开始时间格式错误",
+                        "error": "Invalid start time"
+                    }
+                
+                if not (0 <= end_hour < 24 and 0 <= end_minute < 60):
+                    return {
+                        "name": self.name,
+                        "content": "结束时间格式错误",
+                        "error": "Invalid end time"
+                    }
+                
+                # 计算分钟数 / Calculate minutes
+                start_minutes = start_hour * 60 + start_minute
+                end_minutes = end_hour * 60 + end_minute
+                
+                if start_minutes >= end_minutes:
+                    return {
+                        "name": self.name,
+                        "content": "开始时间必须早于结束时间",
+                        "error": "Start time must be before end time"
+                    }
+            except (ValueError, IndexError):
+                return {
+                    "name": self.name,
+                    "content": "时间格式错误，请使用 HH:MM 格式",
+                    "error": "Invalid time format"
+                }
+
+            # 验证活动类型 / Validate activity type
+            valid_types = ["work", "leisure", "meal", "sleep", "exercise", "study", "other", "rest", "medical"]
+            if activity_type not in valid_types:
+                return {
+                    "name": self.name,
+                    "content": f"无效的活动类型，请使用: {', '.join(valid_types)}",
+                    "error": "Invalid activity type"
+                }
+
+            # 验证优先级 / Validate priority
+            if not (1 <= priority <= 5):
+                return {
+                    "name": self.name,
+                    "content": "优先级必须在1-5之间",
+                    "error": "Invalid priority"
+                }
+
+            # 检查活动描述是否包含计划性用词 / Check if description contains plan-oriented words
+            plan_words = ["计划", "安排", "准备", "将", "打算"]
+            if not any(word in description for word in plan_words):
+                return {
+                    "name": self.name,
+                    "content": "活动描述必须包含计划性用词（如\"计划\"、\"安排\"、\"准备\"、\"将\"、\"打算\"）",
+                    "error": "Description must contain plan-oriented words"
+                }
+
+            async with _plugin_instance._state_lock:
+                schedule = _plugin_instance._state.schedule
+                
+                # 检查时间段是否与现有活动重叠 / Check if time slot overlaps with existing activities
+                for activity in schedule:
+                    act_start_time = activity.get("start_time", "")
+                    act_end_time = activity.get("end_time", "")
+                    if act_start_time and act_end_time:
+                        try:
+                            act_start_hour, act_start_minute = map(int, act_start_time.split(":"))
+                            act_end_hour, act_end_minute = map(int, act_end_time.split(":"))
+                            act_start_minutes = act_start_hour * 60 + act_start_minute
+                            act_end_minutes = act_end_hour * 60 + act_end_minute
+                            
+                            # 检查是否重叠（不包括边界） / Check if overlapping (excluding boundaries)
+                            if not (end_minutes <= act_start_minutes or start_minutes >= act_end_minutes):
+                                return {
+                                    "name": self.name,
+                                    "content": f"时间段 {start_time}-{end_time} 与现有活动 {act_start_time}-{act_end_time} 重叠",
+                                    "error": "Time slot overlaps with existing activity"
+                                }
+                        except (ValueError, IndexError):
+                            continue
+
+                # 修改或添加活动 / Modify or add activity
+                activity_found = False
+                for activity in schedule:
+                    act_start_time = activity.get("start_time", "")
+                    if act_start_time == start_time:
+                        # 修改现有活动 / Modify existing activity
+                        activity["end_time"] = end_time
+                        activity["activity_type"] = activity_type
+                        activity["description"] = description
+                        activity["priority"] = priority
+                        activity_found = True
+                        logger.info(f"[SCHEDULE] Modified activity at {start_time}: {activity_type} - {description}")
+                        break
+
+                if not activity_found:
+                    # 添加新活动 / Add new activity
+                    schedule.append({
+                        "start_time": start_time,
+                        "end_time": end_time,
+                        "activity_type": activity_type,
+                        "description": description,
+                        "priority": priority
+                    })
+                    logger.info(f"[SCHEDULE] Added new activity at {start_time}-{end_time}: {activity_type} - {description}")
+
+                # 按时间排序日程 / Sort schedule by time
+                schedule.sort(key=lambda x: x.get("start_time", ""))
+
+                # 更新当前活动 / Update current activity
+                current_time = await _plugin_instance._time_api.get_current_time()
+                current_hour = current_time.hour
+                current_minute = current_time.minute
+                current_time_minutes = current_hour * 60 + current_minute
+                
+                for activity in schedule:
+                    act_start_time = activity.get("start_time", "")
+                    act_end_time = activity.get("end_time", "")
+                    if act_start_time and act_end_time:
+                        try:
+                            act_start_hour, act_start_minute = map(int, act_start_time.split(":"))
+                            act_end_hour, act_end_minute = map(int, act_end_time.split(":"))
+                            act_start_minutes = act_start_hour * 60 + act_start_minute
+                            act_end_minutes = act_end_hour * 60 + act_end_minute
+                            
+                            if act_start_minutes <= current_time_minutes < act_end_minutes:
+                                _plugin_instance._state.current_activity = activity.get("activity_type", "idle")
+                                _plugin_instance._state.current_activity_description = activity.get("description", "")
+                                break
+                        except (ValueError, IndexError):
+                            continue
+
+            return {
+                "name": self.name,
+                "content": f"✅ 日程修改成功\n⏰ 时间段: {start_time}-{end_time}\n🏃 活动类型: {activity_type}\n📝 活动描述: {description}\n🎯 优先级: {priority}",
+                "success": True,
+                "modified_activity": {
+                    "start_time": start_time,
+                    "end_time": end_time,
+                    "activity_type": activity_type,
+                    "description": description,
+                    "priority": priority
+                }
+            }
+
+        except Exception as e:
+            logger.error(f"ModifyScheduleItemTool failed: {e}", exc_info=True)
+            return {
+                "name": self.name,
+                "content": f"修改日程失败: {str(e)}",
                 "error": str(e)
             }
