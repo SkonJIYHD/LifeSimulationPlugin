@@ -2988,9 +2988,8 @@ class MessageSleepEventHandler(BaseEventHandler):
                             if start_time_minutes <= current_time_minutes < end_time_minutes:
                                 activity_type = activity.get("activity_type", "")
                                 if activity_type == "sleep":
-                                    # 日程是睡眠活动，触发进入睡眠 / Schedule is sleep activity, trigger sleep
-                                    logger.info(f"[SCHEDULE] Current activity is sleep, triggering sleep state")
-                                    await _plugin_instance._enter_sleep_state()
+                                    # 日程是睡眠活动，_update_sleep_state 会处理进入睡眠 / Schedule is sleep activity, _update_sleep_state will handle entering sleep
+                                    logger.info(f"[SCHEDULE] Current activity is sleep, _update_sleep_state will handle sleep state")
                                     break
                         except (ValueError, IndexError) as e:
                             logger.warning(f"[SCHEDULE] Failed to parse activity time {start_time_str}-{end_time_str}: {e}")
