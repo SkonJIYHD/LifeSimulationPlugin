@@ -814,7 +814,22 @@ A: 是的，如果启用了 `auto_regenerate_on_illness`，生病后会自动重
 
 ## 📝 更新日志
 
-
+### v1.7.0 (2026-01-18) - 功能开关与时间显示优化版本
+- ✅ **新增功能开关配置**: 添加 `[features]` 配置节，所有主要功能可独立开关
+  - `startup_enabled` - 启动处理器开关
+  - `stop_enabled` - 停止处理器开关
+  - `state_update_enabled` - 状态更新处理器开关
+  - `message_event_enabled` - 消息事件处理器开关
+  - `social_network_enabled` - 社交网络功能开关
+  - `sleep_system_enabled` - 睡眠系统开关
+  - `activity_execution_enabled` - 活动执行功能开关
+  - `event_handling_enabled` - 随机事件处理功能开关
+  - `commands_enabled` - 命令功能开关
+  - `tools_enabled` - 工具功能开关
+- ✅ **优化时间显示**: `get_life_simulation_status` 工具现在显示更详细的日期信息
+  - 显示昨天、今天、明天、后天的日期和星期
+  - 格式示例: `昨天 | 1月17日 星期六`
+  - 改善用户体验，提供更清晰的时间上下文
 
 ### v1.6.0 (2026-01-15) - 工具修复与完善版本
 - ✅ 修复工具参数格式问题（GetSocialNetworkTool 和 SetRelationshipTool）

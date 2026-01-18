@@ -29,7 +29,7 @@ import os
 import random
 import time
 from dataclasses import dataclass
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from enum import Enum
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
@@ -53,6 +53,8 @@ from src.plugin_system import (
     message_api,
     send_api,
 )
+
+from src.config.config import global_config
 
 logger = get_logger("life_simulation_plugin")
 
@@ -2902,8 +2904,8 @@ class SocialNetworkEventHandler(BaseEventHandler):
 
         try:
             # 获取发送者信息 / Get sender information
-            user_id = str(message.sender_id) if hasattr(message, 'sender_id') else ""
-            user_name = message.sender_name if hasattr(message, 'sender_name') else "Unknown"
+            user_id = str(message.message_base_info.get("user_id", "")) if hasattr(message, 'message_base_info') else ""
+            user_name = message.message_base_info.get("user_nickname", "Unknown") if hasattr(message, 'message_base_info') else "Unknown"
             message_content = message.plain_text if hasattr(message, 'plain_text') else ""
 
             if not user_id:
@@ -2944,10 +2946,10 @@ class MessageSleepEventHandler(BaseEventHandler):
         # 检查是否是 Dream 功能发送的消息 / Check if message is from Dream system
         # Dream 功能通常使用特定的发送者ID或消息类型
         is_dream_message = False
-        if hasattr(message, 'self_id'):
+        if hasattr(message, 'message_base_info'):
             # 检查发送者ID是否为机器人自己（Dream系统通常以机器人身份发送）
-            sender_id = str(message.sender_id) if hasattr(message, 'sender_id') else ""
-            bot_id = message.self_id
+            sender_id = str(message.message_base_info.get("user_id", ""))
+            bot_id = str(global_config.bot.qq_account) if hasattr(global_config, 'bot') else ""
             if sender_id == bot_id:
                 # 是机器人自己发送的消息，可能是Dream系统
                 is_dream_message = True
@@ -3007,8 +3009,8 @@ class MessageSleepEventHandler(BaseEventHandler):
         """处理睡眠期间的消息 / Handle message during sleep"""
         try:
             # 获取发送者信息 / Get sender information
-            user_id = str(message.sender_id) if hasattr(message, 'sender_id') else ""
-            user_name = message.sender_name if hasattr(message, 'sender_name') else "Unknown"
+            user_id = str(message.message_base_info.get("user_id", "")) if hasattr(message, 'message_base_info') else ""
+            user_name = message.message_base_info.get("user_nickname", "Unknown") if hasattr(message, 'message_base_info') else "Unknown"
             message_content = message.plain_text if hasattr(message, 'plain_text') else ""
 
             # 记录睡眠期间的消息 / Log messages during sleep
@@ -3428,8 +3430,20 @@ class GetStatusTool(BaseTool):
             # 当前时间 / Current time
             current_time = datetime.now()
             current_time_str = current_time.strftime("%H:%M")
-            current_date_str = current_time.strftime("%Y-%m-%d")
-            status_lines.append(f"🕐 当前时间: {current_time_str} ({current_date_str})")
+
+            # 显示今、明、后三天的日期 / Show today, tomorrow, and day after tomorrow dates
+            weekdays = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
+            today = current_time.date()
+            yesterday = today - timedelta(days=1)
+            tomorrow = today + timedelta(days=1)
+            day_after_tomorrow = today + timedelta(days=2)
+
+            status_lines.append(f"🕐 当前时间: {current_time_str}")
+            status_lines.append(f"📅 日期信息:")
+            status_lines.append(f"  昨天 | {yesterday.month}月{yesterday.day}日 {weekdays[yesterday.weekday()]}")
+            status_lines.append(f"  今天 | {today.month}月{today.day}日 {weekdays[today.weekday()]}")
+            status_lines.append(f"  明天 | {tomorrow.month}月{tomorrow.day}日 {weekdays[tomorrow.weekday()]}")
+            status_lines.append(f"  后天 | {day_after_tomorrow.month}月{day_after_tomorrow.day}日 {weekdays[day_after_tomorrow.weekday()]}")
 
             # 节日信息 / Holiday information
             is_holiday = state.get("is_holiday", False)

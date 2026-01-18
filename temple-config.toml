@@ -35,6 +35,63 @@ update_interval = 60
 data_dir = "data"
 
 # ============================================================
+# [features] - 功能开关配置 / Feature Toggle Configuration
+# ============================================================
+[features]
+# 是否启用启动处理器 / Enable startup handler
+# 负责插件启动时的初始化工作 / Handles plugin initialization on startup
+startup_enabled = true
+
+# 是否启用停止处理器 / Enable stop handler
+# 负责插件停止时的清理工作 / Handles plugin cleanup on stop
+stop_enabled = true
+
+# 是否启用状态更新处理器 / Enable state update handler
+# 负责定期更新机器人状态 / Handles periodic state updates
+state_update_enabled = true
+
+# 是否启用消息事件处理器 / Enable message event handler
+# 负责处理消息事件，更新疲劳度、饥饿度等 / Handles message events, updates fatigue, hunger, etc.
+message_event_enabled = true
+
+# 是否启用社交网络功能 / Enable social network feature
+# 负责管理用户关系和亲密度 / Manages user relationships and intimacy
+social_network_enabled = true
+
+# 是否启用睡眠系统 / Enable sleep system
+# 负责管理睡眠状态和消息拦截 / Manages sleep state and message blocking
+sleep_system_enabled = true
+
+# 是否启用活动执行功能 / Enable activity execution feature
+# 负责执行日程中的活动 / Executes scheduled activities
+activity_execution_enabled = true
+
+# 是否启用随机事件处理功能 / Enable random event handling feature
+# 负责处理随机事件 / Handles random events
+event_handling_enabled = true
+
+# 是否启用命令功能 / Enable command feature
+# 负责处理用户命令 / Handles user commands
+commands_enabled = true
+
+# 是否启用工具功能 / Enable tool feature
+# 负责提供LLM可调用的工具 / Provides tools for LLM to call
+tools_enabled = true
+
+# ============================================================
+# 命令开关配置 / Command Toggle Configuration
+# ============================================================
+
+# 是否启用状态查询命令 / Enable status query command
+status_command_enabled = true
+
+# 是否启用日程查询命令 / Enable schedule query command
+schedule_command_enabled = true
+
+# 是否启用社交网络查询命令 / Enable social network query command
+social_network_command_enabled = true
+
+# ============================================================
 # [ai] - AI模型配置 / AI Model Configuration
 # ============================================================
 [ai]
@@ -615,9 +672,6 @@ timeout = 5
 # [commands] - 命令配置 / Commands Configuration
 # ============================================================
 [commands]
-# 是否启用所有命令 / Enable all commands
-enabled = true
-
 # 状态查询命令 / Status query command
 [commands.status]
 enabled = true
