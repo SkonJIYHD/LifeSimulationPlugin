@@ -196,9 +196,9 @@ schedule_generation = """你是一个生活规划助手，需要为机器人生�
 - 治疗建议：{illness_treatment}
 
 请生成今天的完整日程安排（00:00-23:59），格式为JSON数组，每个元素包含：
-- start_time: 开始时间（HH:MM格式）
-- end_time: 结束时间（HH:MM格式）
-- activity_type: 活动类型（work, leisure, meal, sleep, exercise, study, other, rest, medical）
+- start_time: 开始时间（HH:MM格式，必须使用此字段名）
+- end_time: 结束时间（HH:MM格式，必须使用此字段名）
+- activity_type: 活动类型（work, leisure, meal, sleep, exercise, study, other, rest, medical，必须使用此字段名）
 - description: 活动描述（使用计划性用词，如"计划"、"安排"、"准备"等）
 - priority: 优先级（1-5，5最高）
 
@@ -210,6 +210,7 @@ schedule_generation = """你是一个生活规划助手，需要为机器人生�
 5. 必须包含早上起床（如07:00-08:00）、上午活动、午餐、下午活动、晚餐、晚上活动、睡觉等
 6. 不要从当前时间开始生成，要从00:00开始生成完整的一整天
 7. 日程要符合人格特点和个人习惯
+8. 【关键】必须使用正确的字段名：start_time、end_time、activity_type，不要使用 time、activity 等其他字段名
 
 注意：
 1. 日程要符合人格特点和个人习惯
@@ -222,6 +223,25 @@ schedule_generation = """你是一个生活规划助手，需要为机器人生�
    - "准备晚餐"
    - "计划休息"
    - "准备睡觉"
+3. JSON格式示例：
+```json
+[
+  {
+    "start_time": "00:00",
+    "end_time": "08:00",
+    "activity_type": "sleep",
+    "description": "计划在床上睡觉",
+    "priority": 5
+  },
+  {
+    "start_time": "08:00",
+    "end_time": "09:00",
+    "activity_type": "meal",
+    "description": "安排早餐时间",
+    "priority": 4
+  }
+]
+```
 3. 生病系统调整（健康度越高越健康）/ Illness system adjustment (higher health is healthier):
    - healthy (80-100): 正常日程，可安排工作、运动、娱乐 / Normal schedule, can arrange work, exercise, entertainment
    - recovering (60-79): 减少工作强度，安排康复活动 / Reduce work intensity, arrange recovery activities

@@ -1011,18 +1011,20 @@ schedule_generation = """你是一个生活规划助手，需要为机器人生�
 {habits}
 
 请生成今天的完整日程安排（00:00-23:59），格式为JSON数组，每个元素包含：
-- time: 时间（HH:MM格式）
-- activity: 活动类型（work, leisure, meal, sleep, exercise, study, other, rest, medical）
+- start_time: 开始时间（HH:MM格式，必须使用此字段名）
+- end_time: 结束时间（HH:MM格式，必须使用此字段名）
+- activity_type: 活动类型（work, leisure, meal, sleep, exercise, study, other, rest, medical，必须使用此字段名）
 - description: 活动描述（详细说明，要具体描述正在做什么，例如"在图书馆写论文"、"在食堂吃午饭"、"在宿舍休息"等，不要只写"写论文"、"吃饭"、"休息"）
 - priority: 优先级（1-5，5最高）
 
 【重要】日程要求：
 1. 必须生成完整的一天的日程，从00:00到23:59，不要生成跨天的日程
 2. 所有活动的时间必须在今天（{current_date}）范围内
-3. 不要生成明天凌晨的活动（如00:00-06:00的活动应该安排在今天的晚上或不要安排）
-4. 必须包含早上起床（如07:00-09:00）、上午活动、午餐、下午活动、晚餐、晚上活动、睡觉等
-5. 不要从当前时间开始生成，要从00:00开始生成完整的一整天
-6. 日程要符合人格特点和个人习惯
+3. 每个活动必须有明确的开始时间和结束时间，时间段之间不能有空隙
+4. 必须使用正确的字段名：start_time、end_time、activity_type，不要使用 time、activity 等其他字段名
+5. 必须包含早上起床（如07:00-08:00）、上午活动、午餐、下午活动、晚餐、晚上活动、睡觉等
+6. 不要从当前时间开始生成，要从00:00开始生成完整的一整天
+7. 日程要符合人格特点和个人习惯
 
 注意：
 1. 日程要符合人格特点和个人习惯
@@ -1032,14 +1034,35 @@ schedule_generation = """你是一个生活规划助手，需要为机器人生�
    - slightly_ill (40-59): 减少工作，增加休息时间 / Reduce work, increase rest time
    - ill (20-39): 主要安排休息、轻度活动 / Mainly rest and light activities
    - seriously_ill (0-19): 只安排休息、医疗活动、必要的生活活动 / Only rest, medical activities, and essential life activities
-4. 如果疲劳度高（>70），要安排更多休息 / If fatigue is high (>70), arrange more rest
-5. 如果饥饿度高（>70），要优先安排用餐 / If hunger is high (>70), prioritize meals
-6. 节假日可以安排更多休闲活动 / Holidays can have more leisure activities
-7. 确保三餐时间合理 / Ensure reasonable meal times
-8. 确保有足够的睡眠时间 / Ensure sufficient sleep time
-9. 生病时可以安排医疗活动（medical）和休息活动（rest）/ When ill, can arrange medical activities and rest
-10. 日程应该包含8-15个活动，覆盖一整天 / Schedule should contain 8-15 activities covering the whole day
-11. 睡觉时间应该安排在晚上（如22:00-23:59），不要安排到明天凌晨 / Sleep time should be scheduled in the evening (e.g., 22:00-23:59), not tomorrow morning
+3. 如果疲劳度高（>70），要安排更多休息 / If fatigue is high (>70), arrange more rest
+4. 如果饥饿度高（>70），要优先安排用餐 / If hunger is high (>70), prioritize meals
+5. 节假日可以安排更多休闲活动 / Holidays can have more leisure activities
+6. 确保三餐时间合理 / Ensure reasonable meal times
+7. 确保有足够的睡眠时间 / Ensure sufficient sleep time
+8. 生病时可以安排医疗活动（medical）和休息活动（rest）/ When ill, can arrange medical activities and rest
+9. 日程应该包含8-15个活动，覆盖一整天 / Schedule should contain 8-15 activities covering the whole day
+10. 睡觉时间应该安排在晚上（如22:00-23:59），不要安排到明天凌晨 / Sleep time should be scheduled in the evening (e.g., 22:00-23:59), not tomorrow morning
+11. 时间段必须连续，不能重叠或遗漏 / Time slots must be continuous, no overlaps or gaps
+
+JSON格式示例：
+```json
+[
+  {
+    "start_time": "00:00",
+    "end_time": "08:00",
+    "activity_type": "sleep",
+    "description": "计划在床上睡觉",
+    "priority": 5
+  },
+  {
+    "start_time": "08:00",
+    "end_time": "09:00",
+    "activity_type": "meal",
+    "description": "安排早餐时间",
+    "priority": 4
+  }
+]
+```
 
 请只返回JSON数组，不要有其他内容。"""
 
@@ -1788,6 +1811,48 @@ verbose = false
                         logger.error(f"Failed to parse schedule JSON even after fixing commas: {e2}")
                         return []
                 if isinstance(schedule, list):
+                    # 转换旧格式到新格式 / Convert old format to new format
+                    converted_schedule = []
+                    for i, activity in enumerate(schedule):
+                        converted_activity = {}
+                        
+                        # 处理时间字段 / Handle time fields
+                        if "start_time" in activity and "end_time" in activity:
+                            # 新格式，直接使用 / New format, use directly
+                            converted_activity["start_time"] = activity["start_time"]
+                            converted_activity["end_time"] = activity["end_time"]
+                        elif "time" in activity:
+                            # 旧格式，需要转换 / Old format, need conversion
+                            converted_activity["start_time"] = activity["time"]
+                            # 结束时间为下一个活动的开始时间，如果没有下一个活动则为 23:59
+                            if i + 1 < len(schedule):
+                                next_activity = schedule[i + 1]
+                                if "time" in next_activity:
+                                    converted_activity["end_time"] = next_activity["time"]
+                                elif "start_time" in next_activity:
+                                    converted_activity["end_time"] = next_activity["start_time"]
+                                else:
+                                    converted_activity["end_time"] = "23:59"
+                            else:
+                                converted_activity["end_time"] = "23:59"
+                        else:
+                            logger.warning(f"Activity {i} missing time fields, skipping")
+                            continue
+                        
+                        # 处理活动类型字段 / Handle activity type field
+                        converted_activity["activity_type"] = activity.get("activity_type", activity.get("activity", "other"))
+                        
+                        # 处理描述字段 / Handle description field
+                        converted_activity["description"] = activity.get("description", "")
+                        
+                        # 处理优先级字段 / Handle priority field
+                        converted_activity["priority"] = activity.get("priority", 3)
+                        
+                        converted_schedule.append(converted_activity)
+                    
+                    schedule = converted_schedule
+                    logger.info(f"Converted schedule format: {len(schedule)} activities")
+                    
                     async with self._state_lock:
                         self._state.schedule = schedule
                         self._state.schedule_generated_date = date_str
@@ -1827,7 +1892,7 @@ verbose = false
                                 self._state.current_activity = current_activity_obj.get("activity_type", "idle")
                                 self._state.current_activity_description = current_activity_obj.get("description", "")
                                 self._state.last_activity_time = time.time()
-                            logger.info(f"Set current activity based on schedule: {self._state.current_activity} at {current_activity_obj.get('time', '')}")
+                            logger.info(f"Set current activity based on schedule: {self._state.current_activity} at {current_activity_obj.get('start_time', '')}")
                         else:
                             logger.warning("No matching activity found after schedule generation")
                     except Exception as e:

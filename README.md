@@ -751,7 +751,76 @@ plugins/LifeSimulationPlugin/
 [prompts]
 # 日程生成提示词
 schedule_generation = """你是一个生活规划助手，需要为机器人生成今天的日程安排。
-...
+
+请根据以下信息生成一个合理的日程：
+- 当前时间：{current_time}
+- 当前日期：{current_date}
+- 星期：{day_of_week}
+- 是否周末：{is_weekend}
+- 是否节假日：{is_holiday}
+- 当前健康状态：{health_status}
+- 当前疲劳度：{fatigue_level}/100
+- 当前饥饿度：{hunger_level}/100
+
+人格特点：
+{personality}
+
+个人习惯：
+{habits}
+
+【疾病信息】
+- 疾病名称：{illness_name}
+- 生病原因：{illness_reason}
+- 症状描述：{illness_symptoms}
+- 治疗建议：{illness_treatment}
+
+请生成今天的完整日程安排（00:00-23:59），格式为JSON数组，每个元素包含：
+- start_time: 开始时间（HH:MM格式，必须使用此字段名）
+- end_time: 结束时间（HH:MM格式，必须使用此字段名）
+- activity_type: 活动类型（work, leisure, meal, sleep, exercise, study, other, rest, medical，必须使用此字段名）
+- description: 活动描述（使用计划性用词，如"计划"、"安排"、"准备"等）
+- priority: 优先级（1-5，5最高）
+
+【重要】日程要求：
+1. 必须生成完整的一天的日程，从00:00到23:59，不要生成跨天的日程
+2. 所有活动的时间必须在今天（{current_date}）范围内
+3. 每个活动必须有明确的开始时间和结束时间，时间段之间不能有空隙
+4. 活动描述必须使用计划性用词，如"计划"、"安排"、"准备"、"将"、"打算"等
+5. 必须包含早上起床（如07:00-08:00）、上午活动、午餐、下午活动、晚餐、晚上活动、睡觉等
+6. 不要从当前时间开始生成，要从00:00开始生成完整的一整天
+7. 日程要符合人格特点和个人习惯
+8. 【关键】必须使用正确的字段名：start_time、end_time、activity_type，不要使用 time、activity 等其他字段名
+
+注意：
+1. 日程要符合人格特点和个人习惯
+2. 活动描述示例：
+   - "计划起床洗漱"
+   - "安排早餐时间"
+   - "准备开始工作"
+   - "计划午休"
+   - "安排运动时间"
+   - "准备晚餐"
+   - "计划休息"
+   - "准备睡觉"
+3. JSON格式示例：
+```json
+[
+  {
+    "start_time": "00:00",
+    "end_time": "08:00",
+    "activity_type": "sleep",
+    "description": "计划在床上睡觉",
+    "priority": 5
+  },
+  {
+    "start_time": "08:00",
+    "end_time": "09:00",
+    "activity_type": "meal",
+    "description": "安排早餐时间",
+    "priority": 4
+  }
+]
+```
 """
 
 # 随机事件生成提示词
@@ -972,6 +1041,13 @@ A: 是的，如果启用了 `auto_regenerate_on_illness`，生病后会自动重
 - ✅ **更新文档**
   - 更新设计文档，添加疾病诊断系统说明
   - 更新 README，添加新特性说明
+- ✅ **修复日程格式兼容性问题**
+  - 添加旧格式到新格式的自动转换功能
+  - 支持 `time` 和 `activity` 字段自动转换为 `start_time`、`end_time` 和 `activity_type`
+  - 根据活动列表自动计算结束时间
+  - 更新提示词，强调使用正确的字段名
+  - 添加JSON格式示例到提示词
+  - 修复 "No matching activity found after schedule generation" 警告
 
 ### v1.5.0 (2026-01-14) - 社交网络版本
 - ✅ 实现社交网络功能
