@@ -2,443 +2,196 @@
 
 一个基于 AI 驱动的事件及人体模拟插件，让机器人具有真实人类的生理状态、日常活动、社交行为和环境感知能力，使机器人更加拟人化和生动。
 
-> 本 README 由 GLM-4.7 编写
+> 本 README 由 GLM-4.7 编写，Claude sonnet 协助润色。
+[![许可证](https://img.shields.io/badge/许可证-AGPL--3.0-green.svg)](/LICENSE)
+[![MaiBot](https://img.shields.io/badge/MaiBot-0.12.0+-orange.svg)](https://github.com/MaiM-with-u/MaiBot)
 
-## 🤝 贡献
+## 🚀 快速开始
 
-欢迎通过以下方式参与贡献：
-
-- **Pull Requests (PR)**: 欢迎提交功能改进、bug修复或文档更新
-- **Issues**: 遇到问题或有建议，欢迎提出 Issue
-- **分支开发**: 欢迎创建新分支进行开发工作
-
-## ✨ 特性
-
-- 🤖 **AI 驱动的日程生成** - AI 根据人格、习惯和当前状态生成日程
-  - **时间段形式**: 使用 start_time 和 end_time 定义时间段（如 08:00-09:00）
-  - **计划性用词**: 活动描述使用计划性用词（如"计划"、"安排"、"准备"）
-  - **时间段连续**: 所有活动的时间段连续，不重叠或遗漏
-- 🎲 **AI 驱动的随机事件生成** - AI 根据当前情境生成随机事件
-- 🏥 **生病系统** - AI 多维度判断是否生病，生病后自动调整日程
-  - **疾病诊断系统**: AI 自动诊断具体疾病（名称、原因、症状、治疗）
-  - **日程联动**: 生病后日程包含医疗活动，根据疾病信息调整
-- 💚 **健康状态由事件决定** - 健康状态由随机事件和日程决定
-- 🎯 **习惯系统** - 习惯可以配置或由 AI 根据人格生成
-- 🎉 **节日 API 集成** - 通过 API 动态获取节假日信息
-- 😊 **AI 驱动的情绪判断** - AI 根据多方面因素判断情绪
-- 📝 **可编辑的 AI 提示词** - 提示词在配置文件中，可自定义
-- 💬 **AI 生成话语** - 所有对话由 AI 生成，不固定
-- 🔒 **只读生理状态** - 生理状态数据不能通过命令修改
-- ⏰ **自定义时间/日期 API** - 支持用户自定义时间日期获取方式
-- 🔧 **可配置 AI 模型** - 支持 9 种模型配置类型
-- 🛠️ **习惯工具** - LLM 可调用工具获取习惯信息
-- 👥 **社交网络系统** - 记录用户关系，实现个性化社交行为
-- 💕 **亲密度系统** - 通过互动积累和衰减机制管理亲密度
-- 🔗 **关系管理** - 支持9种关系类型（陌生人、熟人、朋友、好友、挚友、家人、伴侣、敌人、拉黑）
-- 🎯 **关系设置工具** - LLM 可调用工具设置用户关系类型，包括敌人和拉黑
-- 📅 **日程查询工具** - LLM 可调用工具获取日程信息和当前活动
-- 📊 **状态查询工具** - LLM 可调用工具获取当前状态信息（疲劳度、饥饿度、健康度、情绪、睡眠状态等）
-- 😴 **完整睡眠系统** - 6种睡眠状态自动转换，睡眠期间不回复消息，疲劳度和健康度自动恢复
-- 📅 **日程联动睡眠** - 当日程为睡眠活动时自动入睡，日程切换时自动醒来
-- 🤖 **AI 智能自动回复** - AI 根据睡眠状态、消息内容、关系亲密度智能判断是否回复
-- 🔔 **打扰唤醒机制** - 浅睡时可能被大量消息、重要消息、紧急关键词吵醒
-- 🔧 **紧急关键词可配置** - 支持自定义紧急关键词列表，灵活控制睡眠唤醒条件
-- 🌙 **Dream消息过滤** - 正确识别和过滤MaiBot Dream系统消息，确保Dream系统正常工作
-- 📉 **回复频率降低** - 根据当前活动类型自动调整回复频率，需要动手的活动降低回复概率
-
-## 📋 功能概览
-
-### 生理状态模拟
-- **睡眠/清醒状态**: 模拟人类的睡眠周期，包含6种状态（清醒、困倦、入睡中、浅睡、深睡、醒来中）
-  - 睡眠状态自动转换（清醒→困倦→入睡中→浅睡→深睡）
-  - 醒来状态自动转换（深睡→浅睡→醒来中→清醒）
-  - **日程联动**: 当当前日程为睡眠活动时自动进入睡眠状态，日程切换时自动醒来
-  - 睡眠期间自动拦截所有消息，不回复
-  - **AI自动回复**: AI根据睡眠状态、消息内容、关系亲密度智能判断是否回复及回复内容
-  - **打扰唤醒**: 浅睡时可能被大量消息、重要消息或紧急关键词吵醒
-  - 睡眠期间疲劳度逐渐恢复
-  - 睡眠期间健康度逐渐恢复
-  - 根据日程时间和疲劳度自动触发睡眠
-  - 根据日程时间和睡眠时长自动触发醒来
-  - 可配置睡眠时长限制（最短4小时，最长10小时）
-  - 支持手动唤醒功能
-- **疲劳度**: 模拟人类的疲劳程度（0-100），每次消息时按概率增加（默认70%，每次增加2-5点）
-- **饥饿度**: 模拟人类的饥饿程度（0-100），每次消息时按概率增加（默认70%，每次增加2-5点）
-- **健康状态**: 模拟人类的健康状态，包含生病系统
-  - **疾病诊断**: AI 自动诊断具体疾病（名称、原因、症状、治疗）
-  - **健康度范围**: 0-100（越高越健康）
-  - **健康状态**: 健康(80-100)、康复中(60-79)、轻微不适(40-59)、生病(20-39)、严重生病(0-19)
-- **情绪状态**: 模拟人类的情绪状态
-
-### 日常活动模拟
-- **日程生成**: AI 根据当前情况生成日程安排
-  - **时间段形式**: 使用 start_time 和 end_time 定义时间段（如 08:00-09:00）
-  - **计划性用词**: 活动描述使用计划性用词（如"计划"、"安排"、"准备"）
-  - **时间段连续**: 所有活动的时间段连续，不重叠或遗漏
-  - **活动类型**: work, leisure, meal, sleep, exercise, study, other, rest, medical
-  - **生病联动**: 生病后日程包含医疗活动，根据疾病信息调整
-- **活动执行**: 执行日程中的各种活动
-
-### 事件触发系统
-- **随机事件**: AI 根据当前情境生成随机事件
-- **事件影响**: 事件会影响健康、疲劳、饥饿、情绪等状态
-
-### 习惯系统
-- **习惯配置**: 手动配置个人习惯
-- **AI 生成习惯**: AI 根据人格特点生成习惯
-- **习惯访问**: LLM 可通过工具调用访问习惯信息
-
-### 社交网络系统
-- **用户关系管理**: 记录和管理与用户的关系
-- **亲密度系统**: 通过互动积累和衰减机制管理亲密度
-- **互动记录**: 自动记录与用户的互动历史
-- **关系类型**: 支持9种关系类型（陌生人、熟人、朋友、好友、挚友、家人、伴侣、敌人、拉黑）
-- **个性化行为**: 根据关系类型调整回复风格
-- **关系设置工具**: LLM 可调用工具设置用户关系类型，包括敌人和拉黑，并记录变更原因
-
-### 环境感知
-- **时间感知**: 感知当前时间（支持自定义 API）
-- **节日感知**: 感知节日，调整行为
-
-## 🚀 安装
-
-### 前置要求
-- Python 3.10+
-- MaiBot 0.12.0+
-
-### 安装步骤
+### 安装
 
 1. 将插件目录放置在 `plugins/LifeSimulationPlugin/`
+2. 在 WebUI 中启用插件
+3. 首次运行自动生成配置文件
+4. 根据需要调整 `config.toml` 配置
 
-2. 确保 `plugins/LifeSimulationPlugin/` 目录包含以下文件：
-   ```
-   plugins/LifeSimulationPlugin/
-   ├── plugin.py
-   ├── _manifest.json
-   ├── config.toml
-   ├── requirements.txt
-   └── data/
-   ```
+### 基础命令
 
-3. 在 WebUI 中启用插件
-
-4. 首次运行时，插件会自动生成包含默认提示词的配置文件
-
-## ⚙️ 配置
-
-### 配置文件位置
-- 配置文件: `plugins/LifeSimulationPlugin/config.toml`
-
-### 主要配置项
-
-#### [plugin] - 插件基础配置
-```toml
-[plugin]
-enabled = true              # 是否启用插件
-update_interval = 60       # 状态更新间隔（秒）
-data_dir = "data"            # 数据目录
+```
+/life_status     # 查询当前状态
+/life_schedule   # 查询日程安排
+/life_social     # 查询社交网络
 ```
 
-#### [ai] - AI 模型配置
+## ✨ 核心特性
+
+<details>
+<summary><b>🤖 AI 驱动系统</b></summary>
+
+- **日程生成**: AI 根据人格、习惯和状态生成个性化日程
+- **随机事件**: AI 根据情境生成随机事件
+- **情绪判断**: AI 多维度判断情绪状态
+- **习惯生成**: AI 根据人格特点生成个人习惯
+- **疾病诊断**: AI 自动诊断疾病并调整日程
+
+</details>
+
+<details>
+<summary><b>😴 完整睡眠系统</b></summary>
+
+- **6种睡眠状态**: 清醒 → 困倦 → 入睡中 → 浅睡 → 深睡 → 醒来中
+- **日程联动**: 根据日程自动入睡/醒来
+- **智能回复**: AI 判断是否在睡眠中回复
+- **打扰唤醒**: 重要消息/紧急关键词可能唤醒
+- **状态恢复**: 睡眠期间疲劳度和健康度自动恢复
+
+</details>
+
+<details>
+<summary><b>👥 社交网络系统</b></summary>
+
+- **9种关系类型**: 陌生人、熟人、朋友、好友、挚友、家人、伴侣、敌人、拉黑
+- **亲密度系统**: 互动增长、时间衰减
+- **AI判断**: AI 根据互动内容智能调整亲密度
+- **关系管理**: LLM 可设置用户关系类型
+- **个性化行为**: 根据关系调整回复风格
+
+</details>
+
+<details>
+<summary><b>🏥 生病系统</b></summary>
+
+- **AI诊断**: 自动诊断疾病名称、原因、症状、治疗
+- **健康状态**: 5个等级（健康 → 康复中 → 轻微不适 → 生病 → 严重生病）
+- **日程调整**: 生病后自动生成包含医疗活动的日程
+- **多维判断**: 根据疲劳、饥饿、情绪等综合判断
+
+</details>
+
+<details>
+<summary><b>🔧 工具系统</b></summary>
+
+LLM 可调用以下工具获取信息:
+
+- `get_life_simulation_habits` - 获取个人习惯
+- `get_social_network_info` - 获取社交网络信息
+- `set_user_relationship` - 设置用户关系类型
+- `get_life_simulation_schedule` - 获取日程信息
+- `get_life_simulation_status` - 获取当前状态
+
+</details>
+
+## ⚙️ 配置说明
+
+<details>
+<summary><b>AI 模型配置</b></summary>
+
+支持 9 种模型配置类型,可指定具体模型:
+
 ```toml
 [ai]
-schedule_model = "replyer"  # 日程生成模型
-event_model = "tool_use"     # 随机事件生成模型
-emotion_model = "planner"   # 情绪判断模型
-habit_model = "replyer"     # 习惯生成模型
-temperature = 0.7           # AI 温度
-max_tokens = 1000           # AI 最大 token 数
+schedule_model = "replyer:gpt-4"           # 日程生成
+event_model = "tool_use:gpt-4-turbo"       # 随机事件
+emotion_model = "planner:claude-3-sonnet"  # 情绪判断
+habit_model = "replyer"                    # 习惯生成
+temperature = 0.7
+max_tokens = 2500
 ```
 
-**模型配置格式**:
-- **格式1**: 使用预定义模型类型
-  ```toml
-  schedule_model = "replyer"
-  ```
-- **格式2**: 指定具体模型名称（推荐）
-  ```toml
-  schedule_model = "replyer:gpt-4"
-  schedule_model = "replyer:claude-3-sonnet"
-  schedule_model = "tool_use:gpt-4-turbo"
-  ```
+**可用模型类型**: `utils`, `tool_use`, `replyer`, `planner`, `vlm`, `voice`, `embedding`, `lpmm_entity_extract`, `lpmm_rdf_build`
 
-**可用模型配置类型**:
-- `utils` - 工具模型（表情包、取名、关系、情绪等）
-- `tool_use` - 工具调用模型
-- `replyer` - 回复生成模型
-- `planner` - 决策模型
-- `vlm` - 图像识别模型
-- `voice` - 语音识别模型
-- `embedding` - 嵌入模型
-- `lpmm_entity_extract` - 实体提取模型
-- `lpmm_rdf_build` - RDF 构建模型
+</details>
 
-**说明**:
-- 使用 `类型:模型名称` 格式可以指定具体的模型
-- 系统会自动查找包含指定模型名称的模型
-- 如果找到多个匹配，优先选择完全匹配的
-- 如果找不到匹配的模型，会使用第一个可用模型
+<details>
+<summary><b>睡眠系统配置</b></summary>
 
-#### [prompts] - AI 提示词配置
-```toml
-[prompts]
-schedule_generation = "..."    # 日程生成提示词
-random_event_generation = "..."  # 随机事件生成提示词
-emotion_judgment = "..."      # 情绪判断提示词
-habit_generation = "..."        # 习惯生成提示词
-```
-
-提示词支持变量替换：
-- `{current_time}` - 当前时间
-- `{current_date}` - 当前日期
-- `{day_of_week}` - 星期
-- `{is_weekend}` - 是否周末
-- `{is_holiday}` - 是否节假日
-- `{holiday_name}` - 节日名称
-- `{health_status}` - 健康状态
-- `{fatigue_level}` - 疲劳度
-- `{hunger_level}` - 饥饿度
-- `{personality}` - 人格特点
-- `{habits}` - 个人习惯
-- `{recent_messages}` - 最近消息
-
-#### [schedule] - 日程配置
-```toml
-[schedule]
-regenerate_daily = true                 # 每天重新生成日程
-random_event_probability = 0.1          # 随机事件触发概率
-illness_system_enabled = true             # 启用生病系统
-illness_probability_multiplier = 1.0     # 生病概率倍数
-auto_regenerate_on_illness = true        # 生病时自动重新生成日程
-```
-
-#### [time_api] - 时间/日期 API 配置
-```toml
-[time_api]
-method = "builtin"    # 时间获取方式（builtin/custom）
-url = ""             # 自定义时间 API URL
-timeout = 5          # 请求超时（秒）
-```
-
-#### [holiday_api] - 节日 API 配置
-```toml
-[holiday_api]
-enabled = true                              # 启用节日检测
-url = "https://timor.tech/api/holiday/info/{date}"  # 节日 API URL
-cache_duration = 86400                       # 缓存时长（秒）
-timeout = 5                                  # 请求超时（秒）
-```
-
-#### [habits] - 习惯配置
-```toml
-[habits]
-use_ai_generation = true    # 使用 AI 生成习惯
-speaking_habits = []       # 说话习惯
-behavior_habits = []       # 行为习惯
-interests = []             # 兴趣爱好
-```
-
-#### [commands] - 命令配置
-```toml
-[commands]
-enabled = true    # 启用所有命令
-```
-
-#### [state] - 状态配置
-```toml
-[state]
-filename = "state.json"                    # 状态保存文件名
-auto_save_interval = 300                   # 自动保存间隔（秒）
-message_state_update_probability = 0.7     # 消息状态更新概率（0.0-1.0）
-```
-
-**message_state_update_probability 说明**:
-- 每次收到消息时，按此概率增加疲劳度和饥饿度
-- `0.0` = 永不更新
-- `0.7` = 70% 概率更新（默认值）
-- `1.0` = 每次都更新
-- 建议值: 0.3-0.8
-
-#### [sleep] - 睡眠系统配置
 ```toml
 [sleep]
-enabled = true                    # 启用睡眠系统
-min_sleep_hours = 4               # 最短睡眠时间（小时）
-max_sleep_hours = 10              # 最长睡眠时间（小时）
-allow_manual_wake = true          # 是否允许手动唤醒
+enabled = true                     # 启用睡眠系统
+min_sleep_hours = 4                # 最短睡眠时间
+max_sleep_hours = 10               # 最长睡眠时间
 
-# AI自动回复配置
-ai_reply_enabled = true           # 启用AI判断自动回复
-ai_model = "replyer"              # AI模型
-ai_reply_probability = 0.3        # AI回复概率（0.0-1.0）
+# AI自动回复
+ai_reply_enabled = true            # 启用AI判断回复
+ai_reply_probability = 0.3         # 回复概率
 
-# 打扰唤醒配置
-disturbance_enabled = true        # 启用打扰唤醒
-light_sleep_wake_prob = 0.5       # 浅睡唤醒概率
-deep_sleep_wake_prob = 0.1        # 深睡唤醒概率
-message_freq_threshold = 3        # 消息频率阈值（每分钟）
-intimacy_wake_threshold = 60      # 亲密度唤醒阈值
-
-# 紧急关键词配置
-emergency_keywords = "紧急,救命,快点,重要,急事"  # 紧急关键词列表（逗号分隔）
-
-# 默认自动回复（AI不回复时使用）
-sleep_reply = "我现在在睡觉，明天再聊~"
+# 打扰唤醒
+disturbance_enabled = true         # 启用打扰唤醒
+light_sleep_wake_prob = 0.5        # 浅睡唤醒概率
+intimacy_wake_threshold = 60       # 亲密度唤醒阈值
+emergency_keywords = "紧急,救命,快点,重要,急事"  # 紧急关键词
 ```
 
-**睡眠系统说明**:
+</details>
 
-**基础配置**:
-- `enabled`: 启用睡眠系统（true/false）
-- `min_sleep_hours`: 最短睡眠时间，防止睡眠过短（建议: 4-6小时）
-- `max_sleep_hours`: 最长睡眠时间，防止睡眠过长（建议: 8-12小时）
-- `allow_manual_wake`: 是否允许通过命令手动唤醒（true/false）
+<details>
+<summary><b>社交网络配置</b></summary>
 
-**AI自动回复配置**:
-- `ai_reply_enabled`: 启用AI判断自动回复（true/false）
-- `ai_model`: AI判断使用的模型（replyer/planner等）
-- `ai_reply_probability`: AI回复概率，控制回复频率（建议: 0.2-0.5）
-
-**打扰唤醒配置**:
-- `disturbance_enabled`: 启用打扰唤醒功能（true/false）
-- `light_sleep_wake_prob`: 浅睡时被消息吵醒的概率（建议: 0.3-0.7）
-- `deep_sleep_wake_prob`: 深睡时被消息吵醒的概率（建议: 0.05-0.2）
-- `message_freq_threshold`: 消息频率阈值，每分钟超过此数量可能被吵醒（建议: 2-5）
-- `intimacy_wake_threshold`: 亲密度阈值，关系亲密的用户可能唤醒（建议: 50-80）
-
-**紧急关键词配置**:
-- `emergency_keywords`: 紧急关键词列表，逗号分隔（如: "紧急,救命,快点,重要,急事"）
-- 包含紧急关键词的消息可能唤醒机器人
-- 支持自定义关键词列表，灵活控制唤醒条件
-
-**默认自动回复**:
-- `sleep_reply`: AI不回复时使用的默认消息，留空则不回复
-
-**睡眠状态**:
-- `awake` (清醒): 正常活动，可以回复消息
-- `sleepy` (困倦): 疲劳度较高，准备入睡，可以回复消息
-- `falling_asleep` (入睡中): 正在入睡，不回复消息
-- `light_sleep` (浅睡): 轻度睡眠，不回复消息，可能被吵醒
-- `deep_sleep` (深睡): 深度睡眠，不回复消息，疲劳度快速恢复，难以被吵醒
-- `waking_up` (醒来中): 正在醒来，不回复消息
-
-**睡眠触发条件**（优先级从高到低）:
-1. **日程联动**: 当前日程活动为 `sleep` 类型（最高优先级）
-2. **疲劳度触发**: 疲劳度 > 80（自动触发）
-3. **时间触发**: 时间接近睡觉时间
-4. **手动触发**: 通过命令手动触发（可选）
-
-**醒来触发条件**（优先级从高到低）:
-1. **日程联动**: 当前日程活动从 `sleep` 变为其他活动（最高优先级）
-2. **消息打扰**: 浅睡时被大量消息、重要消息或紧急关键词吵醒
-3. **时长限制**: 睡眠时长达到最大睡眠时间
-4. **手动唤醒**: 通过命令手动唤醒（可选）
-
-**打扰唤醒机制**:
-- **消息频率**: 1分钟内超过阈值数量的消息可能被吵醒
-- **关系亲密度**: 关系亲密的用户（亲密度 > 阈值）可能唤醒
-- **紧急关键词**: 包含紧急关键词（如"紧急"、"救命"、"快点"、"重要"、"急事"等）的消息可能唤醒
-- **睡眠深度**: 浅睡唤醒概率高，深睡唤醒概率低
-- **Dream消息过滤**: MaiBot Dream系统发送的消息不会被睡眠处理器拦截，确保Dream系统正常工作
-
-**AI自动回复机制**:
-- AI根据以下因素判断是否回复：
-  - 当前睡眠状态（浅睡可能回复，深睡不回复）
-  - 已睡眠时长（刚入睡可能回复，睡久不回复）
-  - 消息内容（重要消息可能回复）
-  - 发送者关系（关系亲密可能回复）
-  - 消息数量（消息太多可能不回复）
-
-**睡眠期间行为**:
-- 自动拦截所有消息，不回复（除非AI判断需要回复）
-- AI智能判断是否回复及回复内容
-- 可被消息打扰唤醒（浅睡概率高，深睡概率低）
-- 疲劳度逐渐降低（每分钟降低 0.5-1）
-- 健康度逐渐恢复（每分钟恢复 0.1-0.2）
-- 饥饿度保持不变或缓慢增加
-- 不执行日程活动
-- 不生成随机事件
-- 记录睡眠期间的消息数量和内容
-
-#### [social_network] - 社交网络配置
 ```toml
 [social_network]
-enabled = true                      # 是否启用社交网络
-intimacy_growth_method = "ai"      # 亲密度增长方式（ai/probability/fixed）
-intimacy_growth_rate = 1            # 亲密度增长率（fixed方式）
-intimacy_growth_probability = 0.5   # 亲密度增长概率（probability方式）
-intimacy_ai_model = "replyer"       # 亲密度AI模型（ai方式）
-intimacy_decay_rate = 0.1           # 亲密度衰减率（每次衰减减少）
-decay_interval = 86400              # 衰减间隔（秒，默认24小时）
+enabled = true                      # 启用社交网络
+intimacy_growth_method = "ai"       # 亲密度增长方式 (ai/probability/fixed)
+intimacy_ai_model = "replyer"       # AI判断模型
+intimacy_decay_rate = 0.1           # 衰减率
+decay_interval = 86400              # 衰减间隔(秒)
 ```
 
-**配置说明**:
-- `enabled`: 是否启用社交网络功能
-- `intimacy_growth_method`: 亲密度增长方式
-  - `ai`: AI根据互动内容判断是否增加亲密度及增加多少（推荐）
-  - `probability`: 每次互动按概率增加亲密度
-  - `fixed`: 每次互动固定增加亲密度
-- `intimacy_growth_rate`: 每次互动增加的亲密度（fixed方式，建议: 1-5）
-- `intimacy_growth_probability`: 每次互动增加亲密度的概率（probability方式，建议: 0.3-0.7）
-- `intimacy_ai_model`: 用于判断亲密度的AI模型（ai方式）
-- `intimacy_decay_rate`: 每次衰减减少的亲密度（建议: 0.1-1.0）
-- `decay_interval`: 亲密度衰减的时间间隔（默认: 86400秒/24小时）
+**亲密度增长方式**:
+- `ai` - AI根据互动内容判断 (推荐)
+- `probability` - 按概率增长
+- `fixed` - 固定增长
 
-**AI判断标准**:
-- 正向互动（友好、有趣、支持等）应该增加亲密度
-- 负向互动（敌对、攻击、冷漠等）不应该增加亲密度
-- 中性互动可以少量增加或不增加
-- 亲密度越高，增加的幅度应该越小
-- 互动次数越多，增加的幅度应该越小
+</details>
 
-#### [reply_reduction] - 回复频率降低配置
+<details>
+<summary><b>功能开关配置</b></summary>
+
 ```toml
-[reply_reduction]
-enabled = true                                      # 是否启用回复频率降低功能
-reduction_activities = "work,study,exercise,medical"  # 需要动手的活动类型列表
-reduction_factor = 0.5                              # 回复概率降低因子（0.0-1.0）
+[features]
+startup_enabled = true              # 启动处理器
+state_update_enabled = true         # 状态更新
+message_event_enabled = true        # 消息事件
+social_network_enabled = true       # 社交网络
+sleep_system_enabled = true         # 睡眠系统
+activity_execution_enabled = true   # 活动执行
+event_handling_enabled = true       # 随机事件
+commands_enabled = true             # 命令功能
+tools_enabled = true                # 工具功能
 ```
 
-**配置说明**:
-- `enabled`: 是否启用回复频率降低功能（true/false）
-- `reduction_activities`: 需要动手的活动类型列表，逗号分隔
-  - **可用活动类型**:
-    - `work` - 工作/学习（如：计划开始工作、准备学习、安排编程任务）
-    - `leisure` - 休闲娱乐（如：计划玩游戏、准备看电影、安排休息时间）
-    - `meal` - 用餐（如：计划早餐、安排午餐、准备晚餐）
-    - `sleep` - 睡眠（如：计划睡觉、准备午休）
-    - `exercise` - 运动（如：计划跑步、准备健身、安排散步）
-    - `study` - 学习（如：计划阅读、准备复习、安排学习时间）
-    - `other` - 其他（如：计划购物、准备外出、安排其他事务）
-    - `rest` - 休息（如：计划休息、准备小憩、安排放松时间）
-    - `medical` - 医疗（如：计划就医、准备治疗、安排体检）
-  - **推荐配置**:
-    - 专注模式: `"work,study,exercise,medical"` - 工作、学习、运动、医疗时降低回复
-    - 轻松模式: `"exercise,other"` - 仅运动、其他事务时降低回复
-    - 严格模式: `"work,study,exercise,other,medical"` - 大部分活动都降低回复
-- `reduction_factor`: 回复概率降低因子（0.0-1.0）
-  - `0.0` - 不降低回复概率
-  - `0.3` - 降低30%回复概率（轻微降低）
-  - `0.5` - 降低50%回复概率（中等降低，推荐）
-  - `0.7` - 降低70%回复概率（大幅降低）
-  - `1.0` - 降低100%回复概率（完全不回复）
+</details>
 
-**工作原理**:
-- 当机器人进行需要动手的活动时，自动降低回复频率
-- 降低因子存储在消息的 `additional_data` 中，供下游处理使用
-- 实际回复概率 = 原始回复概率 × (1 - reduction_factor)
+<details>
+<summary><b>其他配置</b></summary>
 
-## 💻 使用方法
+```toml
+[schedule]
+regenerate_daily = true                  # 每天重新生成日程
+illness_system_enabled = true            # 启用生病系统
+auto_regenerate_on_illness = true        # 生病时自动重新生成日程
 
-### 命令列表
+[state]
+message_state_update_probability = 0.7   # 消息状态更新概率
 
-#### `/life_status` - 查询当前状态
+[reply_reduction]
+enabled = true                           # 回复频率降低
+reduction_activities = "work,study,exercise,medical"
+reduction_factor = 0.5                   # 降低因子
+```
+
+</details>
+
+## 📖 使用指南
+
+<details>
+<summary><b>命令列表</b></summary>
+
+### `/life_status` - 查询当前状态
+
 显示所有生理状态、当前活动、节日信息和情绪。
 
-**示例**:
 ```
-用户: /life_status
-机器人: 📊 我的状态：
+📊 我的状态：
 😴 睡眠状态: awake
 😫 疲劳度: 15/100
 🍔 饥饿度: 22/100
@@ -448,687 +201,182 @@ reduction_factor = 0.5                              # 回复概率降低因子�
 🎉 节日: 无
 ```
 
-#### `/life_schedule` - 查询日程安排
+### `/life_schedule` - 查询日程安排
+
 显示 AI 生成的日程安排。
 
-**示例**:
 ```
-用户: /life_schedule
-机器人: 📅 日程安排 (2026-01-13):
+📅 日程安排 (2026-01-13):
 
-⏰ 08:00 - breakfast (早餐) [优先级: 5]
-⏰ 09:00 - work (工作) [优先级: 4]
-⏰ 12:00 - meal (午餐) [优先级: 5]
-⏰ 18:00 - meal (晚餐) [优先级: 5]
-⏰ 20:00 - leisure (娱乐) [优先级: 3]
-⏰ 23:00 - sleep (睡觉) [优先级: 5]
+⏰ 08:00-09:00 breakfast (早餐) [优先级: 5]
+⏰ 09:00-12:00 work (工作) [优先级: 4]
+⏰ 12:00-13:00 meal (午餐) [优先级: 5]
+...
 ```
 
-#### `/life_social` - 查询社交网络信息
+### `/life_social` - 查询社交网络
+
 显示社交网络中的用户关系信息。
 
-**参数**:
-- `list` (默认): 显示所有用户列表
-- `detail`: 查询特定用户的详细信息
-- `user_id`: 用户ID（仅在 detail 模式下使用）
-
-**示例**:
 ```
-用户: /life_social
-机器人: 👥 社交网络概览（共 3 人）：
+👥 社交网络概览（共 3 人）：
 
 1. 张三
    🔗 朋友 | 💕 45/100 | 💬 12次互动
 
 2. 李四
    🔗 熟人 | 💕 25/100 | 💬 5次互动
-
-3. 王五
-   🔗 挚友 | 💕 85/100 | 💬 30次互动
+...
 ```
 
-### 工具列表
+</details>
 
-#### `get_life_simulation_habits` - 获取习惯信息
-LLM 可调用此工具获取机器人的个人习惯信息。
+<details>
+<summary><b>LLM 工具调用</b></summary>
 
-**参数**: 无
+### `get_life_simulation_habits` - 获取习惯信息
 
-**返回内容**:
-```json
-{
-  "name": "get_life_simulation_habits",
-  "content": "说话习惯: 喜欢用表情, 偶尔使用语气词\n行为习惯: 早起, 爱运动\n兴趣爱好: 音乐, 电影, 游戏\n偏好设置: food_preference: 甜食, music_preference: 流行音乐",
-  "habits": {
-    "speaking_habits": ["喜欢用表情", "偶尔使用语气词"],
-    "behavior_habits": ["早起", "爱运动"],
-    "interests": ["音乐", "电影", "游戏"],
-    "preferences": {"food_preference": "甜食", "music_preference": "流行音乐"}
-  }
-}
-```
+LLM 可调用此工具获取机器人的个人习惯,根据习惯调整回复风格。
 
-**使用场景**: LLM 可以在生成回复时调用此工具，根据习惯信息调整回复风格。
+### `get_social_network_info` - 获取社交网络信息
 
-#### `get_social_network_info` - 获取社交网络信息
-LLM 可调用此工具获取社交网络信息，包括用户关系、亲密度和互动历史。
+LLM 可调用此工具获取用户关系、亲密度和互动历史,根据关系调整回复。
+
+### `set_user_relationship` - 设置用户关系
+
+LLM 可根据互动内容设置用户关系类型,包括敌人和拉黑。
 
 **参数**:
-- `user_id` (可选): 用户ID，如果提供则查询该用户的详细关系信息，如果不提供则返回所有用户的摘要
+- `user_id` - 用户ID
+- `relationship_type` - 关系类型 (stranger/acquaintance/friend/close_friend/best_friend/family/partner/enemy/blocked)
+- `reason` - 设置原因
 
-**返回内容**:
-```json
-{
-  "name": "get_social_network_info",
-  "content": "👥 社交网络概览（共 3 人）：\n• 张三: 朋友 (亲密度: 45/100, 互动: 12次)\n• 李四: 熟人 (亲密度: 25/100, 互动: 5次)\n• 王五: 挚友 (亲密度: 85/100, 互动: 30次)",
-  "relationships": [...],
-  "total_count": 3
-}
-```
+### `get_life_simulation_schedule` - 获取日程信息
 
-**使用场景**: LLM 可以在生成回复时调用此工具，根据用户关系调整回复风格。
+LLM 可调用此工具了解当前正在做什么,根据活动调整回复。
 
-#### `set_user_relationship` - 设置用户关系
-LLM 可调用此工具设置用户的关系类型，包括陌生人、熟人、朋友、好友、挚友、家人、伴侣、敌人、拉黑。
+### `get_life_simulation_status` - 获取状态信息
 
-**参数**:
-- `user_id` (必需): 用户ID，要设置关系的用户
-- `relationship_type` (必需): 关系类型，可选值：
-  - `stranger` - 陌生人
-  - `acquaintance` - 熟人
-  - `friend` - 朋友
-  - `close_friend` - 好友
-  - `best_friend` - 挚友
-  - `family` - 家人
-  - `partner` - 伴侣
-  - `enemy` - 敌人
-  - `blocked` - 拉黑
-- `reason` (可选): 设置关系的原因，用于记录
+LLM 可调用此工具了解当前状态,根据疲劳度、饥饿度、情绪等调整回复。
 
-**返回内容**:
-```json
-{
-  "name": "set_user_relationship",
-  "content": "已将用户 张三 的关系从 朋友 更改为 敌人\n原因: 用户多次进行恶意攻击",
-  "success": true,
-  "user_id": "123456",
-  "user_name": "张三",
-  "old_relationship": "friend",
-  "new_relationship": "enemy"
-}
-```
+</details>
 
-**使用场景**:
-- LLM 可以根据用户的互动内容判断是否需要调整关系
-- 当用户表现出敌对行为时，可以设置为敌人
-- 当用户进行恶意攻击时，可以设置为拉黑
-- 可以记录关系变更的原因，便于后续查看
+## 📝 更新历史
 
-**注意事项**:
-- 拉黑（blocked）的关系类型不会被自动更新，即使亲密度变化
-- 拉黑用户的亲密度不会随时间衰减
-- 敌人（enemy）的关系类型会根据亲密度自动更新
-- 敌人的亲密度会随时间衰减
-- 设置关系时会自动在备注中记录变更原因
+<details>
+<summary><b>v1.7.0 (2026-01-21) - 稳定性增强版本</b></summary>
 
-#### `get_life_simulation_schedule` - 获取日程信息
-LLM 可调用此工具获取机器人的日程安排，包括当前活动、今天的所有活动和日程生成日期。
+### 主要更新
+- ✅ 添加功能开关配置 `[features]`,所有主要功能可独立开关
+- ✅ 优化时间显示,显示昨天/今天/明天/后天的日期
+- ✅ 增强JSON解析:正则提取、中文标点替换、尾随逗号修复
+- ✅ 动态max_tokens计算,防止JSON截断(自动调整到3500 tokens)
+- ✅ 修复睡眠处理器日程同步:双向同步(入睡/唤醒)
+- ✅ 修复数据库初始化:确保父目录存在
+- ✅ 修复跨天时间处理:支持23:00-07:00等跨午夜时间段
+- ✅ 增强社交网络工具:支持user_name查找
+- ✅ 修复Union类型导入
 
-**参数**: 无
+### 技术细节
+- JSON解析支持AI包裹文本的提取
+- 中文标点自动转换为英文标点
+- 睡眠状态与日程完全同步
+- 数据库目录自动创建
+- 跨天时间正确处理
 
-**返回内容**:
-```json
-{
-  "name": "get_life_simulation_schedule",
-  "content": "🏃 当前活动: work - 正在处理工作任务\n\n📅 日程安排 (2026-01-15):\n⏰ 08:00 - breakfast\n   早餐\n   [优先级: 5]\n⏰ 09:00 - work\n   工作任务\n   [优先级: 4]\n⏰ 12:00 - meal\n   午餐\n   [优先级: 5]",
-  "current_activity": "work",
-  "current_activity_description": "正在处理工作任务",
-  "schedule_generated_date": "2026-01-15",
-  "schedule": [...]
-}
-```
+</details>
 
-**使用场景**:
-- LLM 可以在生成回复时调用此工具，了解当前正在做什么
-- 用户询问日程安排时，可以提供详细的日程信息
-- 根据当前活动调整回复风格（比如工作时简洁回复，休闲时轻松回复）
-- 用户询问是否有空时，可以根据日程判断
+<details>
+<summary><b>v1.6.0 (2026-01-15) - 工具修复与完善版本</b></summary>
 
-**注意事项**:
-- 日程由AI每天自动生成
-- 当前活动会根据时间和日程自动更新
-- 如果没有日程，会返回"暂无日程安排"
+- ✅ 修复工具参数格式,符合BaseTool要求
+- ✅ 完整睡眠系统:6种状态、日程联动、AI回复、打扰唤醒
+- ✅ 添加GetScheduleTool和GetStatusTool
+- ✅ JSON解析智能修复
+- ✅ 习惯持久化
+- ✅ 疾病诊断系统
+- ✅ 日程时间段形式
+- ✅ 紧急关键词可配置
+- ✅ Dream消息过滤
+- ✅ 回复频率降低功能
 
-#### `get_life_simulation_status` - 获取状态信息
-LLM 可调用此工具获取机器人的当前状态，包括生理状态、当前活动、节日信息等。
+</details>
 
-**参数**: 无
+<details>
+<summary><b>v1.5.0 (2026-01-14) - 社交网络版本</b></summary>
 
-**返回内容**:
-```json
-{
-  "name": "get_life_simulation_status",
-  "content": "😴 睡眠状态: 清醒\n😫 疲劳度: 35/100 (轻微疲劳)\n🍔 饥饿度: 25/100 (轻微饥饿)\n❤️ 健康度: 85/100 (健康)\n😊 情绪: 平静 (一般, 30/100)\n🏃 当前活动: work - 正在处理工作任务\n🎉 节日: 无",
-  "sleep_state": "awake",
-  "fatigue": 35,
-  "hunger": 25,
-  "health": 85,
-  "health_status": "healthy",
-  "emotion": "calm",
-  "emotion_intensity": 30,
-  "current_activity": "work",
-  "current_activity_description": "正在处理工作任务",
-  "is_holiday": false,
-  "current_holiday": ""
-}
-```
-
-**使用场景**:
-- LLM 可以在生成回复时调用此工具，了解当前状态
-- 疲劳度高时，可能回复更简短或提到需要休息
-- 饥饿度高时，可能提到想吃东西
-- 健康状态不好时，可能提到身体不适
-- 根据情绪调整回复语气（开心时更活泼，疲惫时更温和）
-- 睡眠状态下不会调用此工具（因为睡眠时不会回复）
-
-**注意事项**:
-- 疲劳度范围 0-100，越高越疲劳
-- 饥饿度范围 0-100，越高越饿
-- 健康度范围 0-100，越高越健康
-- 情绪强度范围 0-100，表示情绪的强烈程度
-- 睡眠状态会影响是否回复消息
-
-## 🏥 生病系统
-
-### 健康状态
-- **healthy (80-100)**: 健康
-- **recovering (60-79)**: 康复中
-- **slightly_ill (40-59)**: 轻微不适
-- **ill (20-39)**: 生病
-- **seriously_ill (0-19)**: 严重生病
-
-### 生病判断因素
-AI 会根据以下因素综合判断是否生病：
-- 疲劳度（>70 容易生病）
-- 饥饿度（>70 容易生病）
-- 情绪状态（持续低落容易生病）
-- 当前活动
-- 人格特点
-
-### 生病后行为
-- 自动重新生成符合病情的日程
-- 根据健康状态调整活动强度
-- 康复后自动恢复正常日程
-
-### 生病配置
-```toml
-[schedule]
-illness_system_enabled = true             # 启用生病系统
-illness_probability_multiplier = 1.0     # 生病概率倍数（0.0-2.0）
-auto_regenerate_on_illness = true        # 生病时自动重新生成日程
-```
-
-## 🧪 功能测试状态
-
-### 当前功能状态
-- ✅ **日程表**: 正常 
-- ✅ **习惯**: 正常 - 习惯持久化，人格不变时不重复生成，JSON 智能修复
-- ✅ **状态**: 正常 - 生理状态（睡眠、疲劳、饥饿、健康、情绪）正常更新
-- ✅ **状态影响**: 正常 - LLM 可通过 GetStatusTool 获取状态并影响回复
-- ✅ **睡眠系统**: 正常 - 完整的睡眠周期，日程联动，AI 自动回复，打扰唤醒
-- ✅ **随机事件**: 正常 - AI 驱动的随机事件生成，影响生理状态
-- ✅ **生病系统**: 正常 - AI 多维度判断生病，生病后自动调整日程
-- ✅ **情绪系统**: 正常 - AI 多维度判断情绪，情绪状态影响回复
-- ✅ **社交网络系统**: 正常 - 用户关系管理，亲密度系统，个性化行为
-
-### 已测试的功能
-1. **日程系统**
-   - ✅ AI 自动生成日程
-
-2. **习惯系统**
-   - ✅ AI 自动生成习惯
-   - ✅ 习惯持久化保存
-   - ✅ 人格不变时不重复生成
-   - ✅ JSON 解析错误自动修复
-
-3. **状态系统**
-   - ✅ 状态持久化保存和加载
-   - ✅ 疲劳度、饥饿度按概率更新
-   - ✅ 健康度根据事件影响变化
-   - ✅ 情绪状态 AI 判断
-
-4. **状态影响回复**
-   - ✅ GetStatusTool 工具正常工作
-   - ✅ LLM 可以获取状态信息
-   - ✅ 状态信息可用于调整回复
-
-5. **睡眠系统**
-   - ✅ 睡眠状态自动转换
-   - ✅ 日程联动睡眠
-   - ✅ 睡眠期间消息拦截
-   - ✅ 睡眠期间状态恢复
-   - ✅ AI 智能自动回复
-   - ✅ 打扰唤醒机制
-
-### 待测试的功能
-1. **随机事件系统**
-   - AI 随机事件生成
-   - 事件对生理状态的影响
-   - 事件概率控制
-
-2. **生病系统**
-   - AI 生病判断
-   - 生病概率控制
-   - 生病后日程调整
-
-3. **情绪系统**
-   - AI 情绪判断
-   - 情绪对回复的影响   
-
-4. **社交网络系统**
-   - 用户关系管理
-   - 亲密度增长和衰减
-
-## 📁 文件结构
-
-```
-plugins/LifeSimulationPlugin/
-├── plugin.py              # 插件主文件
-├── _manifest.json         # 插件清单
-├── config.toml            # 配置文件（包含所有提示词）
-├── requirements.txt       # 依赖文件
-└── data/                  # 数据目录
-    └── state.json        # 状态保存文件
-```
-
-## 🔧 配置文件详解
-
-### 提示词配置
-
-所有提示词都在 `config.toml` 的 `[prompts]` 部分：
-
-```toml
-[prompts]
-# 日程生成提示词
-schedule_generation = """你是一个生活规划助手，需要为机器人生成今天的日程安排。
-
-请根据以下信息生成一个合理的日程：
-- 当前时间：{current_time}
-- 当前日期：{current_date}
-- 星期：{day_of_week}
-- 是否周末：{is_weekend}
-- 是否节假日：{is_holiday}
-- 当前健康状态：{health_status}
-- 当前疲劳度：{fatigue_level}/100
-- 当前饥饿度：{hunger_level}/100
-
-人格特点：
-{personality}
-
-个人习惯：
-{habits}
-
-【疾病信息】
-- 疾病名称：{illness_name}
-- 生病原因：{illness_reason}
-- 症状描述：{illness_symptoms}
-- 治疗建议：{illness_treatment}
-
-请生成今天的完整日程安排（00:00-23:59），格式为JSON数组，每个元素包含：
-- start_time: 开始时间（HH:MM格式，必须使用此字段名）
-- end_time: 结束时间（HH:MM格式，必须使用此字段名）
-- activity_type: 活动类型（work, leisure, meal, sleep, exercise, study, other, rest, medical，必须使用此字段名）
-- description: 活动描述（使用计划性用词，如"计划"、"安排"、"准备"等）
-- priority: 优先级（1-5，5最高）
-
-【重要】日程要求：
-1. 必须生成完整的一天的日程，从00:00到23:59，不要生成跨天的日程
-2. 所有活动的时间必须在今天（{current_date}）范围内
-3. 每个活动必须有明确的开始时间和结束时间，时间段之间不能有空隙
-4. 活动描述必须使用计划性用词，如"计划"、"安排"、"准备"、"将"、"打算"等
-5. 必须包含早上起床（如07:00-08:00）、上午活动、午餐、下午活动、晚餐、晚上活动、睡觉等
-6. 不要从当前时间开始生成，要从00:00开始生成完整的一整天
-7. 日程要符合人格特点和个人习惯
-8. 【关键】必须使用正确的字段名：start_time、end_time、activity_type，不要使用 time、activity 等其他字段名
-
-注意：
-1. 日程要符合人格特点和个人习惯
-2. 活动描述示例：
-   - "计划起床洗漱"
-   - "安排早餐时间"
-   - "准备开始工作"
-   - "计划午休"
-   - "安排运动时间"
-   - "准备晚餐"
-   - "计划休息"
-   - "准备睡觉"
-3. JSON格式示例：
-```json
-[
-  {
-    "start_time": "00:00",
-    "end_time": "08:00",
-    "activity_type": "sleep",
-    "description": "计划在床上睡觉",
-    "priority": 5
-  },
-  {
-    "start_time": "08:00",
-    "end_time": "09:00",
-    "activity_type": "meal",
-    "description": "安排早餐时间",
-    "priority": 4
-  }
-]
-```
-"""
-
-# 随机事件生成提示词
-random_event_generation = """你是一个生活事件生成器，需要根据当前情况生成一个随机事件。
-...
-"""
-
-# 情绪判断提示词
-emotion_judgment = """你是一个情绪分析助手，需要判断机器人的当前情绪状态。
-...
-"""
-
-# 习惯生成提示词
-habit_generation = """你是一个习惯分析助手，需要根据人格特点生成个人习惯。
-...
-"""
-```
-
-### 首次运行
-
-插件首次运行时，会自动：
-1. 检查 `config.toml` 是否存在
-2. 如果不存在，创建包含默认提示词的配置文件
-3. 如果提示词为空，重新生成提示词
-
-## ❓ 常见问题
-
-### Q: 如何自定义提示词？
-A: 直接编辑 `config.toml` 文件中的 `[prompts]` 部分，修改对应的提示词内容。
-
-### Q: 如何调整生病概率？
-A: 修改 `[schedule]` 部分的 `illness_probability_multiplier` 值：
-- `0.5` - 降低生病概率
-- `1.0` - 正常概率
-- `2.0` - 提高生病概率
-
-### Q: 如何禁用生病系统？
-A: 修改 `[schedule]` 部分的 `illness_system_enabled` 为 `false`。
-
-### Q: 如何使用自定义时间 API？
-A: 修改 `[time_api]` 部分：
-```toml
-[time_api]
-method = "custom"
-url = "https://worldtimeapi.org/api/timezone/Asia/Shanghai"
-timeout = 5
-```
-
-### Q: 为什么提示词在配置文件中？
-A: 为了让用户可以轻松自定义提示词，而不需要修改代码。首次运行时会自动生成包含默认提示词的配置文件。
-
-### Q: LLM 如何访问习惯信息？
-A: LLM 可以调用 `get_life_simulation_habits` 工具获取习惯信息，然后根据习惯调整回复风格。
-
-### Q: 健康度越高越健康吗？
-A: 是的，健康度范围是 0-100，数值越高表示越健康。
-
-### Q: 生病后会自动调整日程吗？
-A: 是的，如果启用了 `auto_regenerate_on_illness`，生病后会自动重新生成符合病情的日程。
-
-## 📝 更新日志
-
-### v1.7.0 (2026-01-18) - 功能开关与时间显示优化版本
-- ✅ **新增功能开关配置**: 添加 `[features]` 配置节，所有主要功能可独立开关
-  - `startup_enabled` - 启动处理器开关
-  - `stop_enabled` - 停止处理器开关
-  - `state_update_enabled` - 状态更新处理器开关
-  - `message_event_enabled` - 消息事件处理器开关
-  - `social_network_enabled` - 社交网络功能开关
-  - `sleep_system_enabled` - 睡眠系统开关
-  - `activity_execution_enabled` - 活动执行功能开关
-  - `event_handling_enabled` - 随机事件处理功能开关
-  - `commands_enabled` - 命令功能开关
-  - `tools_enabled` - 工具功能开关
-- ✅ **优化时间显示**: `get_life_simulation_status` 工具现在显示更详细的日期信息
-  - 显示昨天、今天、明天、后天的日期和星期
-  - 格式示例: `昨天 | 1月17日 星期六`
-  - 改善用户体验，提供更清晰的时间上下文
-
-### v1.6.0 (2026-01-15) - 工具修复与完善版本
-- ✅ 修复工具参数格式问题（GetSocialNetworkTool 和 SetRelationshipTool）
-- ✅ 将工具参数从字典格式改为元组格式，符合 BaseTool 要求
-- ✅ 工具现在可以通过参数验证，可被 LLM 正确调用
-- ✅ 注册 SocialNetworkEventHandler 实现自动社交网络互动跟踪
-- ✅ 注册 SocialNetworkCommand 支持手动查询社交网络（/life_social）
-- ✅ 注册 MessageSleepEventHandler 实现睡眠期间消息拦截
-- ✅ 更新 _manifest.json 包含所有 16 个组件（6个事件处理器、2个动作、5个工具、3个命令）
-- ✅ 社交网络系统现已完全功能化，支持自动互动记录
-- ✅ 插件现已完全符合 MaiBot 标准插件格式
-- ✅ 完善工具组件文档和使用说明
-- ✅ 睡眠期间自动拦截消息，不回复
-- ✅ 睡眠状态自动转换（awake → sleepy → falling_asleep → light_sleep → deep_sleep）
-- ✅ **日程联动**: 当当前日程为睡眠活动时自动进入睡眠状态
-- ✅ **日程联动**: 日程切换时自动醒来
-- ✅ 睡眠期间疲劳度逐渐恢复
-- ✅ 睡眠期间健康度逐渐恢复
-- ✅ **AI智能自动回复**: AI根据睡眠状态、消息内容、关系亲密度判断是否回复
-- ✅ **打扰唤醒机制**: 浅睡时可能被大量消息、重要消息、紧急关键词吵醒
-- ✅ 可配置睡眠时长限制（最短4小时，最长10小时）
-- ✅ 可配置睡眠期间自动回复消息
-- ✅ 支持手动唤醒功能
-- ✅ 添加 MessageSleepEventHandler 处理睡眠期间消息拦截
-- ✅ 添加 sleep_reply_judgment AI提示词用于判断是否回复
-- ✅ 添加 GetScheduleTool 工具，LLM 可调用获取日程信息和当前活动
-- ✅ 添加 GetStatusTool 工具，LLM 可调用获取当前状态信息（疲劳度、饥饿度、健康度、情绪、睡眠状态等）
-- ✅ 更新组件数量为 16 个（6个事件处理器、2个动作、5个工具、3个命令）
-- ✅ **修复 JSON 解析问题**: 智能修复 AI 生成的 JSON 中的中文引号和尾随逗号
-- ✅ **实现习惯持久化**: 人格不变时不重复生成习惯，使用 MD5 哈希值判断
-- ✅ **生成日程后校验当前时间**: 根据当前时间自动设置当前活动
-- ✅ **状态影响回复**: LLM 可以根据状态信息调整回复风格和内容
-- ✅ **完善睡眠系统**: 实现完整的睡眠状态自动转换逻辑，包括日程联动、疲劳度驱动、睡眠期间恢复等
-- ✅ **新增疾病诊断系统**
-  - 添加 `_diagnose_illness()` 方法，AI自动诊断具体疾病
-  - 疾病信息包含：疾病名称、生病原因、症状描述、治疗建议
-  - AI根据当前状态、人格特点、个人习惯进行诊断
-  - 不同健康状态对应不同严重程度的疾病
-- ✅ **改进日程系统**
-  - 日程使用时间段形式（start_time, end_time）代替单一时间点
-  - 要求活动描述使用计划性用词（如"计划"、"安排"、"准备"）
-  - 要求时间段连续，不重叠或遗漏
-  - 增加 max_tokens 从 1000 到 2500，确保完整生成日程
-- ✅ **优化生理状态变化**
-  - 疲劳度增长从每次+1改为+2~5（随机）
-  - 饥饿度增长从每次+1改为+2~5（随机）
-  - 提高状态变化的感知度
-- ✅ **完善生病与日程联动**
-  - 健康状态变化时自动诊断疾病
-  - 诊断后自动重新生成日程
-  - 日程中包含医疗活动（如"计划服用感冒药"、"安排测量体温"）
-  - 根据疾病症状安排合适的活动
-  - 根据治疗建议安排医疗活动
-  - 根据疾病严重程度调整休息时间
-- ✅ **更新配置文件默认值**
-  - max_tokens 默认值从 1000 改为 2500
-  - 确保日程和事件生成能够完整输出
-- ✅ **更新文档**
-  - 更新设计文档，添加疾病诊断系统说明
-  - 更新 README，添加新特性说明
-- ✅ **紧急关键词可配置**
-  - 添加 `emergency_keywords` 配置项，支持自定义紧急关键词列表
-  - 默认关键词：紧急、救命、快点、重要、急事
-  - 睡眠期间包含紧急关键词的消息可能唤醒机器人
-- ✅ **Dream消息过滤**
-  - 完善睡眠处理器，正确识别和过滤MaiBot Dream系统发送的消息
-  - Dream消息不会被睡眠处理器拦截，确保Dream系统正常工作
-  - Dream消息由机器人自己发送（sender_id == bot_id）
-- ✅ **回复频率降低功能**
-  - 添加 `[reply_reduction]` 配置section
-  - 支持配置需要动手的活动类型（如work、study、exercise等）
-  - 支持配置回复概率降低因子（0.0-1.0）
-  - 当机器人进行需要动手的活动时，自动降低回复频率
-  - 提供3种推荐配置模式：专注模式、轻松模式、严格模式
-- ✅ **完善配置项说明**
-  - 添加详细的配置项注释和使用示例
-  - 添加9种可用活动类型的详细说明
-  - 添加配置示例和推荐配置
-- ✅ **AI模型配置增强**
-  - 支持使用 `类型:模型名称` 格式指定具体模型
-  - 示例：`schedule_model = "replyer:gpt-4"`
-  - 示例：`emotion_model = "planner:claude-3-sonnet"`
-  - 系统会自动查找包含指定模型名称的模型
-  - 如果找到多个匹配，优先选择完全匹配的
-  - 如果找不到匹配的模型，会使用第一个可用模型
-- ✅ 将工具参数从字典格式改为元组格式，符合 BaseTool 要求
-- ✅ 工具现在可以通过参数验证，可被 LLM 正确调用
-- ✅ 注册 SocialNetworkEventHandler 实现自动社交网络互动跟踪
-- ✅ 注册 SocialNetworkCommand 支持手动查询社交网络（/life_social）
-- ✅ 注册 MessageSleepEventHandler 实现睡眠期间消息拦截
-- ✅ 更新 _manifest.json 包含所有 16 个组件（6个事件处理器、2个动作、5个工具、3个命令）
-- ✅ 社交网络系统现已完全功能化，支持自动互动记录
-- ✅ 插件现已完全符合 MaiBot 标准插件格式
-- ✅ 完善工具组件文档和使用说明
-- ✅ 睡眠期间自动拦截消息，不回复
-- ✅ 睡眠状态自动转换（awake → sleepy → falling_asleep → light_sleep → deep_sleep）
-- ✅ **日程联动**: 当当前日程为睡眠活动时自动进入睡眠状态
-- ✅ **日程联动**: 日程切换时自动醒来
-- ✅ 睡眠期间疲劳度逐渐恢复
-- ✅ 睡眠期间健康度逐渐恢复
-- ✅ **AI智能自动回复**: AI根据睡眠状态、消息内容、关系亲密度判断是否回复
-- ✅ **打扰唤醒机制**: 浅睡时可能被大量消息、重要消息、紧急关键词吵醒
-- ✅ 可配置睡眠时长限制（最短4小时，最长10小时）
-- ✅ 可配置睡眠期间自动回复消息
-- ✅ 支持手动唤醒功能
-- ✅ 添加 MessageSleepEventHandler 处理睡眠期间消息拦截
-- ✅ 添加 sleep_reply_judgment AI提示词用于判断是否回复
-- ✅ 添加 GetScheduleTool 工具，LLM 可调用获取日程信息和当前活动
-- ✅ 添加 GetStatusTool 工具，LLM 可调用获取当前状态信息（疲劳度、饥饿度、健康度、情绪、睡眠状态等）
-- ✅ 更新组件数量为 16 个（6个事件处理器、2个动作、5个工具、3个命令）
-- ✅ **修复 JSON 解析问题**: 智能修复 AI 生成的 JSON 中的中文引号和尾随逗号
-- ✅ **实现习惯持久化**: 人格不变时不重复生成习惯，使用 MD5 哈希值判断
-- ✅ **生成日程后校验当前时间**: 根据当前时间自动设置当前活动
-- ✅ **状态影响回复**: LLM 可以根据状态信息调整回复风格和内容
-- ✅ **完善睡眠系统**: 实现完整的睡眠状态自动转换逻辑，包括日程联动、疲劳度驱动、睡眠期间恢复等
-- ✅ **新增疾病诊断系统**
-  - 添加 `_diagnose_illness()` 方法，AI自动诊断具体疾病
-  - 疾病信息包含：疾病名称、生病原因、症状描述、治疗建议
-  - AI根据当前状态、人格特点、个人习惯进行诊断
-  - 不同健康状态对应不同严重程度的疾病
-- ✅ **改进日程系统**
-  - 日程使用时间段形式（start_time, end_time）代替单一时间点
-  - 要求活动描述使用计划性用词（如"计划"、"安排"、"准备"）
-  - 要求时间段连续，不重叠或遗漏
-  - 增加 max_tokens 从 1000 到 2500，确保完整生成日程
-- ✅ **优化生理状态变化**
-  - 疲劳度增长从每次+1改为+2~5（随机）
-  - 饥饿度增长从每次+1改为+2~5（随机）
-  - 提高状态变化的感知度
-- ✅ **完善生病与日程联动**
-  - 健康状态变化时自动诊断疾病
-  - 诊断后自动重新生成日程
-  - 日程中包含医疗活动（如"计划服用感冒药"、"安排测量体温"）
-  - 根据疾病症状安排合适的活动
-  - 根据治疗建议安排医疗活动
-  - 根据疾病严重程度调整休息时间
-- ✅ **更新配置文件默认值**
-  - max_tokens 默认值从 1000 改为 2500
-  - 确保日程和事件生成能够完整输出
-- ✅ **更新文档**
-  - 更新设计文档，添加疾病诊断系统说明
-  - 更新 README，添加新特性说明
-- ✅ **修复日程格式兼容性问题**
-  - 添加旧格式到新格式的自动转换功能
-  - 支持 `time` 和 `activity` 字段自动转换为 `start_time`、`end_time` 和 `activity_type`
-  - 根据活动列表自动计算结束时间
-  - 更新提示词，强调使用正确的字段名
-  - 添加JSON格式示例到提示词
-  - 修复 "No matching activity found after schedule generation" 警告
-
-### v1.5.0 (2026-01-14) - 社交网络版本
 - ✅ 实现社交网络功能
-- ✅ 添加用户关系管理（9种关系类型）
-- ✅ 实现亲密度系统（增长和衰减）
-- ✅ 自动记录用户互动历史
-- ✅ 添加 SocialNetworkEventHandler
-- ✅ 添加 GetSocialNetworkTool 工具
-- ✅ 添加 SocialNetworkCommand 命令
-- ✅ 添加社交网络配置项
-- ✅ 添加社交网络 AI 提示词
-- ✅ 更新文档说明社交网络功能
+- ✅ 9种关系类型
+- ✅ 亲密度系统
+- ✅ 自动互动记录
 
-### v1.4.0 (2026-01-14) - 亲密度优化版本
-- ✅ 优化亲密度增长机制，支持AI判断和概率增长
-- ✅ 添加 intimacy_growth_method 配置项（ai/probability/fixed）
-- ✅ 实现AI判断亲密度逻辑（根据互动内容、用户特征等）
-- ✅ 添加 intimacy_judgment AI提示词
-- ✅ 添加 intimacy_growth_probability 配置项
-- ✅ 添加 intimacy_ai_model 配置项
-- ✅ 更新文档说明亲密度增长机制
+</details>
 
-### v1.3.0 (2026-01-14) - 关系管理增强版本
-- ✅ 添加 SetRelationshipTool 工具，让 AI 可以设置用户关系类型
-- ✅ AI 可以根据互动内容判断并设置用户为敌人或拉黑
-- ✅ 添加关系变更原因跟踪功能
-- ✅ 更新 GetSocialNetworkTool 为可供 LLM 调用
-- ✅ 完善社交网络系统文档
-- ✅ 更新工具组件数量为 3 个
+<details>
+<summary><b>v1.4.0 (2026-01-14) - 亲密度优化版本</b></summary>
 
-### v1.2.0 (2026-01-14) - 优化版本
-- ✅ 优化消息状态更新机制，改为概率更新
-- ✅ 添加 message_state_update_probability 配置项
-- ✅ 默认 70% 概率更新疲劳度和饥饿度
-- ✅ 避免过多消息导致状态过快增长
-- ✅ 更新文档说明概率更新机制
+- ✅ AI判断亲密度增长
+- ✅ 支持3种增长方式
+- ✅ 添加intimacy_judgment提示词
 
-### v1.1.0 (2026-01-13) - 增强版本
-- ✅ 移除 i18n 系统
-- ✅ 提示词移到配置文件中
-- ✅ 支持 9 种 AI 模型配置类型
-- ✅ 支持自定义时间/日期 API
-- ✅ 实现生病系统
-- ✅ 修正健康度逻辑（越高越健康）
-- ✅ 生病后自动重新生成日程
-- ✅ 添加 GetHabitsTool 工具组件
-- ✅ 配置文件更易于人类修改和查看
+</details>
 
-### v1.0.0 (2026-01-13) - 初始版本
-- ✅ 初始版本发布（AI 驱动架构）
-- ✅ 实现AI驱动的日程生成系统
-- ✅ 实现AI驱动的随机事件生成
-- ✅ 实现健康状态由事件决定
-- ✅ 实现习惯系统（配置+AI生成）
-- ✅ 实现节日API集成
-- ✅ 实现AI驱动的情绪判断
-- ✅ 实现可编辑的AI提示词系统
-- ✅ 实现生理状态模拟
-- ✅ 实现 2 个 Action 组件
-- ✅ 实现 3 个 Command 组件
-- ✅ 实现 6 个 EventHandler 组件
-- ✅ 实现 3 个 Tool 组件
+<details>
+<summary><b>v1.3.0 (2026-01-14) - 关系管理增强版本</b></summary>
+
+- ✅ 添加SetRelationshipTool
+- ✅ AI可设置敌人和拉黑
+- ✅ 关系变更原因跟踪
+
+</details>
+
+<details>
+<summary><b>v1.2.0 (2026-01-14) - 优化版本</b></summary>
+
+- ✅ 概率更新机制
+- ✅ 避免状态过快增长
+
+</details>
+
+<details>
+<summary><b>v1.1.0 (2026-01-13) - 增强版本</b></summary>
+
+- ✅ 移除i18n系统
+- ✅ 提示词移到配置文件
+- ✅ 9种AI模型配置
+- ✅ 自定义时间API
+- ✅ 生病系统
+
+</details>
+
+<details>
+<summary><b>v1.0.0 (2026-01-13) - 初始版本</b></summary>
+
+- ✅ AI驱动架构
+- ✅ 日程生成
+- ✅ 随机事件
+- ✅ 习惯系统
+- ✅ 节日API
+- ✅ 情绪判断
+
+</details>
 
 ## 🤝 贡献
 
-欢迎贡献！请遵循以下步骤：
+欢迎通过以下方式参与贡献:
 
-1. Fork 本仓库
-2. 创建特性分支 (`git checkout -b feature/AmazingFeature`)
-3. 提交更改 (`git commit -m 'Add some AmazingFeature'`)
-4. 推送到分支 (`git push origin feature/AmazingFeature`)
-5. 开启 Pull Request
+- **Pull Requests**: 功能改进、bug修复、文档更新
+- **Issues**: 问题反馈和建议
+- **分支开发**: 创建新分支进行开发
 
 ## 📄 许可证
 
- - AGPL-3.0 LICENSE 详见 [LICENSE](/LICENSE) 文件
+AGPL-3.0 LICENSE - 详见 [LICENSE](/LICENSE) 文件
 
 ## 👥 作者
 
-GLM-4.7和讨论出这个项目的所有群友
+GLM-4.7,Claude sonnet 4.5 和讨论出这个项目的所有群友
 
 ## 🙏 致谢
 
-感谢所有为本项目做出贡献的开发者！
+感谢所有为本项目做出贡献的开发者!
