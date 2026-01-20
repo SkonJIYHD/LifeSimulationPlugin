@@ -28,11 +28,12 @@ import json
 import os
 import random
 import time
+from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import datetime, date, timedelta
 from enum import Enum
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Dict, List, Optional, Tuple, Any, Union
 import aiohttp
 
 from src.plugin_system import (
@@ -53,8 +54,6 @@ from src.plugin_system import (
     message_api,
     send_api,
 )
-
-from src.config.config import global_config
 
 logger = get_logger("life_simulation_plugin")
 
@@ -198,7 +197,9 @@ class LifeState:
         self.last_holiday_check: float = 0.0
 
         # Social Network / 社交网络
-        self.social_network: Dict[str, UserRelationship] = {}  # 用户ID -> 用户关系
+        # 注意：社交网络数据已迁移至数据库存储，此处保留空字典以兼容旧代码
+        # Note: Social network data migrated to database, keeping empty dict for backward compatibility
+        self.social_network: Dict[str, UserRelationship] = {}  # 用户ID -> 用户关系（已废弃，仅用于兼容）
         self.social_network_enabled: bool = True  # 是否启用社交网络
 
         # Recent events / 最近事件
@@ -273,14 +274,10 @@ class LifeState:
             self.is_holiday = data.get("is_holiday", False)
             self.social_network_enabled = data.get("social_network_enabled", True)
 
-            # 加载社交网络数据 / Load social network data
-            social_network_data = data.get("social_network", {})
+            # 社交网络数据已迁移至数据库，不再从 JSON 加载
+            # Social network data migrated to database, no longer loading from JSON
+            # 保留空字典以兼容旧代码 / Keeping empty dict for backward compatibility
             self.social_network = {}
-            for user_id, rel_data in social_network_data.items():
-                try:
-                    self.social_network[user_id] = UserRelationship.from_dict(rel_data)
-                except Exception as e:
-                    logger.warning(f"Failed to load relationship for user {user_id}: {e}")
 
             self.recent_event = data.get("recent_event", {})
             self.recent_event_time = data.get("recent_event_time", 0.0)
@@ -293,14 +290,285 @@ class LifeState:
 # Social Network Management / 社交网络管理
 # ============================================================
 
-class SocialNetwork:
-    """社交网络管理类 / Social Network Management Class"""
+class SocialNetworkDB:
+    """社交网络数据库管理类 / Social Network Database Management Class
 
-    def __init__(self, state: LifeState, config: Dict[str, Any], state_lock: asyncio.Lock):
-        """初始化社交网络管理器 / Initialize social network manager"""
+    使用 aiosqlite 实现异步数据库操作，配合 LRU 缓存提升性能。
+    Uses aiosqlite for async database operations, paired with LRU cache for performance.
+    """
+
+    def __init__(self, db_path: str, cache_size: int = 100):
+        """初始化数据库管理器 / Initialize database manager
+
+        Args:
+            db_path: 数据库文件路径 / Database file path
+            cache_size: LRU 缓存大小 / LRU cache size
+        """
+        self.db_path = db_path
+        self.cache_size = cache_size
+        self._cache: OrderedDict[str, UserRelationship] = OrderedDict()  # LRU 缓存 / LRU cache
+        self._dirty: set[str] = set()  # 脏数据标记 / Dirty data markers
+        self._lock = asyncio.Lock()
+        self._db_initialized = False
+
+    async def _ensure_db_initialized(self):
+        """确保数据库已初始化 / Ensure database is initialized"""
+        if self._db_initialized:
+            return
+
+        try:
+            import aiosqlite
+            
+            # 确保父目录存在 / Ensure parent directory exists
+            db_path_obj = Path(self.db_path)
+            db_path_obj.parent.mkdir(parents=True, exist_ok=True)
+            logger.debug(f"[SOCIAL_DB] Ensured database directory exists: {db_path_obj.parent}")
+            
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute("""
+                    CREATE TABLE IF NOT EXISTS user_relationships (
+                        user_id TEXT PRIMARY KEY,
+                        user_name TEXT NOT NULL,
+                        relationship_type TEXT NOT NULL,
+                        intimacy INTEGER NOT NULL DEFAULT 0,
+                        interaction_count INTEGER NOT NULL DEFAULT 0,
+                        last_interaction_time REAL NOT NULL DEFAULT 0.0,
+                        traits TEXT NOT NULL DEFAULT '[]',
+                        notes TEXT NOT NULL DEFAULT ''
+                    )
+                """)
+                await db.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_intimacy ON user_relationships(intimacy DESC)
+                """)
+                await db.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_last_interaction ON user_relationships(last_interaction_time DESC)
+                """)
+                await db.commit()
+            self._db_initialized = True
+            logger.info("[SOCIAL_DB] Database initialized")
+        except Exception as e:
+            logger.error(f"[SOCIAL_DB] Failed to initialize database: {e}")
+
+    def _update_cache(self, user_id: str, relationship: UserRelationship):
+        """更新缓存 / Update cache"""
+        if user_id in self._cache:
+            del self._cache[user_id]
+        self._cache[user_id] = relationship
+
+        # 限制缓存大小 / Limit cache size
+        while len(self._cache) > self.cache_size:
+            self._cache.popitem(last=False)  # 移除最旧的项 / Remove oldest item
+
+    def _get_from_cache(self, user_id: str) -> Optional[UserRelationship]:
+        """从缓存获取 / Get from cache"""
+        if user_id in self._cache:
+            # 移到最后，表示最近使用 / Move to end, indicating recent use
+            relationship = self._cache.pop(user_id)
+            self._cache[user_id] = relationship
+            return relationship
+        return None
+
+    async def get_user(self, user_id: str) -> Optional[UserRelationship]:
+        """获取用户关系 / Get user relationship
+
+        优先从缓存读取，缓存未命中则查询数据库。
+        Priority: cache -> database.
+
+        Args:
+            user_id: 用户ID / User ID
+
+        Returns:
+            用户关系对象，如果不存在则返回 None / User relationship object, or None if not exists
+        """
+        # 先从缓存获取 / Get from cache first
+        cached = self._get_from_cache(user_id)
+        if cached:
+            logger.debug(f"[SOCIAL_DB] Cache hit for user {user_id}")
+            return cached
+
+        # 缓存未命中，查询数据库 / Cache miss, query database
+        try:
+            import aiosqlite
+            await self._ensure_db_initialized()
+
+            async with aiosqlite.connect(self.db_path) as db:
+                async with db.execute(
+                    "SELECT user_id, user_name, relationship_type, intimacy, interaction_count, last_interaction_time, traits, notes "
+                    "FROM user_relationships WHERE user_id = ?",
+                    (user_id,)
+                ) as cursor:
+                    row = await cursor.fetchone()
+
+                    if row:
+                        relationship = UserRelationship(
+                            user_id=row[0],
+                            user_name=row[1],
+                            relationship_type=RelationshipType(row[2]),
+                            intimacy=row[3],
+                            interaction_count=row[4],
+                            last_interaction_time=row[5],
+                            traits=json.loads(row[6]) if row[6] else [],
+                            notes=row[7] if row[7] else ""
+                        )
+                        # 存入缓存 / Store in cache
+                        self._update_cache(user_id, relationship)
+                        logger.debug(f"[SOCIAL_DB] Database hit for user {user_id}")
+                        return relationship
+
+            logger.debug(f"[SOCIAL_DB] User {user_id} not found")
+            return None
+        except Exception as e:
+            logger.error(f"[SOCIAL_DB] Failed to get user {user_id}: {e}")
+            return None
+
+    async def update_user(self, relationship: UserRelationship):
+        """更新用户关系 / Update user relationship
+
+        更新内存缓存，标记为脏数据，异步写入数据库。
+        Update memory cache, mark as dirty, write to database asynchronously.
+
+        Args:
+            relationship: 用户关系对象 / User relationship object
+        """
+        async with self._lock:
+            # 更新缓存 / Update cache
+            self._update_cache(relationship.user_id, relationship)
+
+            # 标记为脏数据 / Mark as dirty
+            self._dirty.add(relationship.user_id)
+
+            logger.debug(f"[SOCIAL_DB] Updated user {relationship.user_id} in cache, marked as dirty")
+
+    async def flush_dirty_data(self):
+        """刷新脏数据到数据库 / Flush dirty data to database
+
+        将所有标记为脏数据的关系写入数据库。
+        Write all marked dirty relationships to database.
+        """
+        if not self._dirty:
+            return
+
+        try:
+            import aiosqlite
+            await self._ensure_db_initialized()
+
+            async with aiosqlite.connect(self.db_path) as db:
+                for user_id in list(self._dirty):
+                    if user_id not in self._cache:
+                        self._dirty.remove(user_id)
+                        continue
+
+                    relationship = self._cache[user_id]
+                    await db.execute("""
+                        INSERT OR REPLACE INTO user_relationships
+                        (user_id, user_name, relationship_type, intimacy, interaction_count, last_interaction_time, traits, notes)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (
+                        relationship.user_id,
+                        relationship.user_name,
+                        relationship.relationship_type.value,
+                        relationship.intimacy,
+                        relationship.interaction_count,
+                        relationship.last_interaction_time,
+                        json.dumps(relationship.traits),
+                        relationship.notes
+                    ))
+
+                await db.commit()
+                logger.info(f"[SOCIAL_DB] Flushed {len(self._dirty)} dirty records to database")
+                self._dirty.clear()
+        except Exception as e:
+            logger.error(f"[SOCIAL_DB] Failed to flush dirty data: {e}")
+
+    async def get_all_users(self) -> Dict[str, UserRelationship]:
+        """获取所有用户关系 / Get all user relationships
+
+        Returns:
+            用户ID到用户关系的字典 / Dictionary of user_id to UserRelationship
+        """
+        try:
+            import aiosqlite
+            await self._ensure_db_initialized()
+
+            async with aiosqlite.connect(self.db_path) as db:
+                async with db.execute(
+                    "SELECT user_id, user_name, relationship_type, intimacy, interaction_count, last_interaction_time, traits, notes "
+                    "FROM user_relationships"
+                ) as cursor:
+                    rows = await cursor.fetchall()
+
+                    result = {}
+                    for row in rows:
+                        relationship = UserRelationship(
+                            user_id=row[0],
+                            user_name=row[1],
+                            relationship_type=RelationshipType(row[2]),
+                            intimacy=row[3],
+                            interaction_count=row[4],
+                            last_interaction_time=row[5],
+                            traits=json.loads(row[6]) if row[6] else [],
+                            notes=row[7] if row[7] else ""
+                        )
+                        result[row[0]] = relationship
+                        # 更新缓存 / Update cache
+                        self._update_cache(row[0], relationship)
+
+                    return result
+        except Exception as e:
+            logger.error(f"[SOCIAL_DB] Failed to get all users: {e}")
+            return {}
+
+    async def delete_user(self, user_id: str):
+        """删除用户关系 / Delete user relationship
+
+        Args:
+            user_id: 用户ID / User ID
+        """
+        async with self._lock:
+            # 从缓存删除 / Remove from cache
+            if user_id in self._cache:
+                del self._cache[user_id]
+
+            # 从脏数据标记删除 / Remove from dirty markers
+            if user_id in self._dirty:
+                self._dirty.remove(user_id)
+
+            # 从数据库删除 / Delete from database
+            try:
+                import aiosqlite
+                await self._ensure_db_initialized()
+
+                async with aiosqlite.connect(self.db_path) as db:
+                    await db.execute("DELETE FROM user_relationships WHERE user_id = ?", (user_id,))
+                    await db.commit()
+                    logger.info(f"[SOCIAL_DB] Deleted user {user_id}")
+            except Exception as e:
+                logger.error(f"[SOCIAL_DB] Failed to delete user {user_id}: {e}")
+
+
+class SocialNetwork:
+    """社交网络管理类 / Social Network Management Class
+
+    使用数据库和缓存双层架构。
+    Uses database and cache dual-layer architecture.
+    """
+
+    def __init__(self, state: LifeState, config: Dict[str, Any], state_lock: asyncio.Lock, db_path: str):
+        """初始化社交网络管理器 / Initialize social network manager
+
+        Args:
+            state: 生活状态对象 / Life state object
+            config: 配置字典 / Configuration dictionary
+            state_lock: 状态锁 / State lock
+            db_path: 数据库文件路径 / Database file path
+        """
         self._state = state
         self._config = config
         self._state_lock = state_lock  # 使用传入的锁 / Use provided lock
+
+        # 数据库管理器 / Database manager
+        cache_size = config.get("cache_size", 100)  # LRU 缓存大小 / LRU cache size
+        self._db = SocialNetworkDB(db_path, cache_size)
 
         # 配置参数 / Configuration parameters
         self.enabled = config.get("enabled", True)
@@ -321,77 +589,88 @@ class SocialNetwork:
         if not self.is_enabled():
             return None
 
-        async with self._state_lock:
-            if user_id not in self._state.social_network:
-                # 新用户，创建关系 / New user, create relationship
-                relationship = UserRelationship(
-                    user_id=user_id,
-                    user_name=user_name,
-                    relationship_type=RelationshipType.STRANGER,
-                    intimacy=0,
-                    interaction_count=0,
-                    last_interaction_time=time.time(),
-                    traits=traits or [],
-                    notes=""
-                )
-                self._state.social_network[user_id] = relationship
-                logger.info(f"Added new user to social network: {user_name} ({user_id})")
-            else:
-                # 更新现有用户 / Update existing user
-                relationship = self._state.social_network[user_id]
-                relationship.user_name = user_name
-                if traits:
-                    # 合并特征 / Merge traits
-                    for trait in traits:
-                        if trait not in relationship.traits:
-                            relationship.traits.append(trait)
+        # 从数据库获取现有关系 / Get existing relationship from database
+        relationship = await self._db.get_user(user_id)
 
-            return self._state.social_network[user_id]
+        if relationship is None:
+            # 新用户，创建关系 / New user, create relationship
+            relationship = UserRelationship(
+                user_id=user_id,
+                user_name=user_name,
+                relationship_type=RelationshipType.STRANGER,
+                intimacy=0,
+                interaction_count=0,
+                last_interaction_time=time.time(),
+                traits=traits or [],
+                notes=""
+            )
+            logger.info(f"Added new user to social network: {user_name} ({user_id})")
+        else:
+            # 更新现有用户 / Update existing user
+            relationship.user_name = user_name
+            if traits:
+                # 合并特征 / Merge traits
+                for trait in traits:
+                    if trait not in relationship.traits:
+                        relationship.traits.append(trait)
+
+        # 更新到数据库（异步）/ Update to database (async)
+        await self._db.update_user(relationship)
+
+        return relationship
 
     async def record_interaction(self, user_id: str, interaction_type: str = "message", message_content: str = "", plugin_instance=None):
         """记录互动 / Record interaction"""
         if not self.is_enabled():
             return
 
-        async with self._state_lock:
-            if user_id in self._state.social_network:
-                relationship = self._state.social_network[user_id]
-                relationship.interaction_count += 1
-                relationship.last_interaction_time = time.time()
+        # 从数据库获取关系 / Get relationship from database
+        relationship = await self._db.get_user(user_id)
 
-                # 根据增长方式增加亲密度 / Increase intimacy based on growth method
-                intimacy_increase = 0
+        if relationship is None:
+            logger.warning(f"[SOCIAL] User {user_id} not found, skipping interaction recording")
+            return
 
-                if self.intimacy_growth_method == "ai":
-                    # AI判断 / AI judgment
-                    # 添加概率控制，避免每次都调用AI / Add probability control to avoid calling AI every time
-                    import random
-                    ai_judgment_probability = plugin_instance.get_config("social_network.ai_judgment_probability", 0.3) if plugin_instance else 0.3
-                    
-                    if random.random() < ai_judgment_probability:
-                        logger.debug(f"[SOCIAL] Using AI judgment for intimacy increase (probability: {ai_judgment_probability})")
-                        intimacy_increase = await self._judge_intimacy_increase(
-                            relationship, message_content, plugin_instance
-                        )
-                    else:
-                        logger.debug(f"[SOCIAL] Skipping AI judgment (probability check failed)")
-                elif self.intimacy_growth_method == "probability":
-                    # 概率判断 / Probability judgment
-                    import random
-                    if random.random() < self.intimacy_growth_probability:
-                        intimacy_increase = self.intimacy_growth_rate
-                        logger.debug(f"[SOCIAL] Probability-based intimacy increase: {intimacy_increase}")
-                else:
-                    # 固定增长 / Fixed increase
-                    intimacy_increase = self.intimacy_growth_rate
-                    logger.debug(f"[SOCIAL] Fixed intimacy increase: {intimacy_increase}")
+        # 更新互动信息 / Update interaction info
+        relationship.interaction_count += 1
+        relationship.last_interaction_time = time.time()
 
-                # 增加亲密度 / Increase intimacy
-                if intimacy_increase > 0:
-                    relationship.intimacy = min(100, relationship.intimacy + intimacy_increase)
+        # 根据增长方式增加亲密度 / Increase intimacy based on growth method
+        intimacy_increase = 0
 
-                # 更新关系类型 / Update relationship type
-                self._update_relationship_type(relationship)
+        if self.intimacy_growth_method == "ai":
+            # AI判断 / AI judgment
+            # 添加概率控制，避免每次都调用AI / Add probability control to avoid calling AI every time
+            import random
+            ai_judgment_probability = plugin_instance.get_config("social_network.ai_judgment_probability", 0.3) if plugin_instance else 0.3
+
+            if random.random() < ai_judgment_probability:
+                logger.debug(f"[SOCIAL] Using AI judgment for intimacy increase (probability: {ai_judgment_probability})")
+                intimacy_increase = await self._judge_intimacy_increase(
+                    relationship, message_content, plugin_instance
+                )
+            else:
+                logger.debug(f"[SOCIAL] Skipping AI judgment (probability check failed)")
+        elif self.intimacy_growth_method == "probability":
+            # 概率判断 / Probability judgment
+            import random
+            if random.random() < self.intimacy_growth_probability:
+                intimacy_increase = self.intimacy_growth_rate
+                logger.debug(f"[SOCIAL] Probability-based intimacy increase: {intimacy_increase}")
+        else:
+            # 固定增长 / Fixed increase
+            intimacy_increase = self.intimacy_growth_rate
+            logger.debug(f"[SOCIAL] Fixed intimacy increase: {intimacy_increase}")
+
+        # 增加亲密度 / Increase intimacy
+        if intimacy_increase > 0:
+            relationship.intimacy = min(100, relationship.intimacy + intimacy_increase)
+
+        # 更新关系类型 / Update relationship type
+        self._update_relationship_type(relationship)
+
+        # 更新到数据库（异步）/ Update to database (async)
+        await self._db.update_user(relationship)
 
     async def _judge_intimacy_increase(self, relationship: UserRelationship, message_content: str, plugin_instance) -> int:
         """AI判断是否增加亲密度及增加多少 / AI judgment for intimacy increase"""
@@ -420,50 +699,17 @@ class SocialNetwork:
                 logger.error(f"Model config not found for {self.intimacy_ai_model}")
                 return 0
 
-            success, response, reasoning, model_used = await llm_api.generate_with_model(
+            # 使用重试机制判断亲密度 / Use retry mechanism to judge intimacy
+            result = await plugin_instance._generate_with_retry(
                 prompt=prompt,
                 model_config=model_config,
                 temperature=temperature,
-                max_tokens=max_tokens
+                max_tokens=max_tokens,
+                context="intimacy judgment",
+                expected_type="dict"
             )
 
-            if not success:
-                logger.error(f"Failed to judge intimacy: {response}")
-                return 0
-
-            # Parse response / 解析响应
-            try:
-                # 移除 markdown 代码块标记 / Remove markdown code block markers
-                cleaned_response = response.strip()
-                if cleaned_response.startswith("```json"):
-                    cleaned_response = cleaned_response[7:]
-                elif cleaned_response.startswith("```"):
-                    cleaned_response = cleaned_response[3:]
-                if cleaned_response.endswith("```"):
-                    cleaned_response = cleaned_response[:-3]
-                cleaned_response = cleaned_response.strip()
-
-                # 替换中文引号为英文引号，避免 JSON 解析错误
-                cleaned_response = cleaned_response.replace('"', '"').replace('"', '"')
-                cleaned_response = cleaned_response.replace(''', "'").replace(''', "'")
-
-                # 尝试解析 JSON
-                try:
-                    result = json.loads(cleaned_response)
-                except json.JSONDecodeError as e:
-                    logger.error(f"Failed to parse JSON after cleaning: {e}")
-                    logger.error(f"Cleaned response (first 1000 chars): {cleaned_response[:1000] if cleaned_response else 'empty'}")
-                    logger.error(f"Original response (first 1000 chars): {response[:1000] if response else 'empty'}")
-                    # 尝试修复常见的 JSON 错误
-                    try:
-                        # 尝试移除可能的尾随逗号
-                        cleaned_response = cleaned_response.replace(',\n}', '\n}').replace(',\n]', '\n]')
-                        cleaned_response = cleaned_response.replace(', }', '}').replace(', ]', ']')
-                        result = json.loads(cleaned_response)
-                        logger.info("Successfully parsed JSON after fixing trailing commas")
-                    except json.JSONDecodeError as e2:
-                        logger.error(f"Failed to parse JSON even after fixing commas: {e2}")
-                        return 0
+            if result and isinstance(result, dict):
                 should_increase = result.get("should_increase", False)
                 increase_amount = result.get("increase_amount", 0)
 
@@ -473,8 +719,8 @@ class SocialNetwork:
                 else:
                     logger.debug(f"AI judgment: no intimacy increase for {relationship.user_name}")
                     return 0
-            except json.JSONDecodeError:
-                logger.error(f"Failed to parse intimacy judgment JSON: {response}")
+            else:
+                logger.error(f"Failed to parse intimacy judgment JSON")
                 return 0
 
         except Exception as e:
@@ -508,57 +754,64 @@ class SocialNetwork:
         if current_time - self.last_decay_time < self.decay_interval:
             return
 
-        async with self._state_lock:
-            for user_id, relationship in self._state.social_network.items():
-                if relationship.relationship_type in [RelationshipType.BLOCKED, RelationshipType.FAMILY, RelationshipType.PARTNER]:
-                    continue  # 拉黑、家人、伴侣不衰减
+        # 从数据库获取所有用户 / Get all users from database
+        all_relationships = await self._db.get_all_users()
 
-                # 衰减亲密度 / Decay intimacy
-                relationship.intimacy = max(0, relationship.intimacy - self.intimacy_decay_rate)
+        for user_id, relationship in all_relationships.items():
+            if relationship.relationship_type in [RelationshipType.BLOCKED, RelationshipType.FAMILY, RelationshipType.PARTNER]:
+                continue  # 拉黑、家人、伴侣不衰减
 
-                # 更新关系类型 / Update relationship type
-                self._update_relationship_type(relationship)
+            # 衰减亲密度 / Decay intimacy
+            relationship.intimacy = max(0, relationship.intimacy - self.intimacy_decay_rate)
 
-            self.last_decay_time = current_time
-            logger.debug("Decayed intimacy for all relationships")
+            # 更新关系类型 / Update relationship type
+            self._update_relationship_type(relationship)
 
-    def get_relationship(self, user_id: str) -> Optional[UserRelationship]:
+            # 更新到数据库 / Update to database
+            await self._db.update_user(relationship)
+
+        self.last_decay_time = current_time
+        logger.debug("Decayed intimacy for all relationships")
+
+    async def get_relationship(self, user_id: str) -> Optional[UserRelationship]:
         """获取用户关系 / Get user relationship"""
         if not self.is_enabled():
             return None
-        return self._state.social_network.get(user_id)
+        return await self._db.get_user(user_id)
 
-    def get_all_relationships(self) -> Dict[str, UserRelationship]:
+    async def get_all_relationships(self) -> Dict[str, UserRelationship]:
         """获取所有关系 / Get all relationships"""
         if not self.is_enabled():
             return {}
-        return self._state.social_network.copy()
+        return await self._db.get_all_users()
 
     async def set_relationship_type(self, user_id: str, relationship_type: RelationshipType):
         """设置关系类型 / Set relationship type"""
         if not self.is_enabled():
             return
 
-        async with self._state_lock:
-            if user_id in self._state.social_network:
-                self._state.social_network[user_id].relationship_type = relationship_type
-                logger.info(f"Set relationship type for {user_id} to {relationship_type.value}")
+        relationship = await self._db.get_user(user_id)
+        if relationship:
+            relationship.relationship_type = relationship_type
+            await self._db.update_user(relationship)
+            logger.info(f"Set relationship type for {user_id} to {relationship_type.value}")
 
     async def set_notes(self, user_id: str, notes: str):
         """设置备注 / Set notes"""
         if not self.is_enabled():
             return
 
-        async with self._state_lock:
-            if user_id in self._state.social_network:
-                self._state.social_network[user_id].notes = notes
+        relationship = await self._db.get_user(user_id)
+        if relationship:
+            relationship.notes = notes
+            await self._db.update_user(relationship)
 
-    def get_relationship_summary(self, user_id: str) -> Optional[str]:
+    async def get_relationship_summary(self, user_id: str) -> Optional[str]:
         """获取关系摘要 / Get relationship summary"""
         if not self.is_enabled():
             return None
 
-        relationship = self.get_relationship(user_id)
+        relationship = await self._db.get_user(user_id)
         if not relationship:
             return None
 
@@ -597,6 +850,8 @@ class TimeAPI:
         self.method = config.get("method", "builtin")
         self.url = config.get("url", "")
         self.timeout = config.get("timeout", 5)
+        self.timezone = config.get("timezone", "Asia/Shanghai")
+        self.calibration_interval = config.get("calibration_interval", 3600)  # 默认1小时 / Default 1 hour
 
     async def get_current_time(self) -> datetime:
         """获取当前时间 / Get current time"""
@@ -615,7 +870,14 @@ class TimeAPI:
                 logger.warning(f"Failed to fetch time from custom API: {e}")
 
         # 默认使用内置datetime / Default to built-in datetime
-        return datetime.now()
+        # 应用时区 / Apply timezone
+        try:
+            import pytz
+            tz = pytz.timezone(self.timezone)
+            return datetime.now(tz)
+        except Exception as e:
+            logger.warning(f"Failed to apply timezone {self.timezone}: {e}")
+            return datetime.now()
 
 
 # ============================================================
@@ -723,6 +985,7 @@ class LifeSimulationPlugin(BasePlugin):
         "state": "状态配置 / State Configuration",
         "sleep": "睡眠系统配置 / Sleep System Configuration",
         "logging": "日志配置 / Logging Configuration",
+        "features": "功能开关配置 / Feature Toggle Configuration",
     }
 
     config_schema: dict = {
@@ -759,6 +1022,8 @@ class LifeSimulationPlugin(BasePlugin):
             ),
             "temperature": ConfigField(type=float, default=0.7, description="AI温度 / AI temperature"),
             "max_tokens": ConfigField(type=int, default=1000, description="AI最大token数 / AI max tokens"),
+            "json_retry_count": ConfigField(type=int, default=2, description="JSON解析重试次数 / JSON parsing retry count"),
+            "json_retry_delay": ConfigField(type=float, default=1.0, description="JSON解析重试延迟（秒）/ JSON parsing retry delay (seconds)"),
         },
         "prompts": {
             "schedule_generation": ConfigField(type=str, default="", description="日程生成提示词 / Schedule generation prompt"),
@@ -834,6 +1099,19 @@ class LifeSimulationPlugin(BasePlugin):
             "message_freq_threshold": ConfigField(type=int, default=3, description="消息频率阈值 / Message frequency threshold"),
             "intimacy_wake_threshold": ConfigField(type=int, default=60, description="亲密度唤醒阈值 / Intimacy wake-up threshold"),
             "sleep_reply": ConfigField(type=str, default="我现在在睡觉，明天再聊~", description="默认自动回复 / Default auto-reply"),
+        },
+        "features": {
+            "startup_enabled": ConfigField(type=bool, default=True, description="启用启动处理器 / Enable startup handler"),
+            "stop_enabled": ConfigField(type=bool, default=True, description="启用停止处理器 / Enable stop handler"),
+            "state_update_enabled": ConfigField(type=bool, default=True, description="启用状态更新处理器 / Enable state update handler"),
+            "message_event_enabled": ConfigField(type=bool, default=True, description="启用消息事件处理器 / Enable message event handler"),
+            "social_network_enabled": ConfigField(type=bool, default=True, description="启用社交网络功能 / Enable social network feature"),
+            "sleep_system_enabled": ConfigField(type=bool, default=True, description="启用睡眠系统 / Enable sleep system"),
+            "activity_execution_enabled": ConfigField(type=bool, default=True, description="启用活动执行功能 / Enable activity execution feature"),
+            "event_handling_enabled": ConfigField(type=bool, default=True, description="启用随机事件处理功能 / Enable random event handling feature"),
+            "commands_enabled": ConfigField(type=bool, default=True, description="启用命令功能 / Enable command feature"),
+            "tools_enabled": ConfigField(type=bool, default=True, description="启用工具功能 / Enable tool feature"),
+            "debug_commands_enabled": ConfigField(type=bool, default=True, description="启用调试命令 / Enable debug commands (debug version only)"),
         },
     }
 
@@ -1000,9 +1278,12 @@ schedule_generation = """你是一个生活规划助手，需要为机器人生�
 - 星期：{day_of_week}
 - 是否周末：{is_weekend}
 - 是否节假日：{is_holiday}
+- 节日名称：{holiday_name}
 - 当前健康状态：{health_status}
 - 当前疲劳度：{fatigue_level}/100
 - 当前饥饿度：{hunger_level}/100
+
+{illness_info}
 
 人格特点：
 {personality}
@@ -1017,50 +1298,50 @@ schedule_generation = """你是一个生活规划助手，需要为机器人生�
 - description: 活动描述（详细说明，要具体描述正在做什么，例如"在图书馆写论文"、"在食堂吃午饭"、"在宿舍休息"等，不要只写"写论文"、"吃饭"、"休息"）
 - priority: 优先级（1-5，5最高）
 
-【重要】日程要求：
-1. 必须生成完整的一天的日程，从00:00到23:59，不要生成跨天的日程
-2. 所有活动的时间必须在今天（{current_date}）范围内
-3. 每个活动必须有明确的开始时间和结束时间，时间段之间不能有空隙
-4. 必须使用正确的字段名：start_time、end_time、activity_type，不要使用 time、activity 等其他字段名
-5. 必须包含早上起床（如07:00-08:00）、上午活动、午餐、下午活动、晚餐、晚上活动、睡觉等
-6. 不要从当前时间开始生成，要从00:00开始生成完整的一整天
-7. 日程要符合人格特点和个人习惯
+【重要】日程要求:
+1. 必须生成完整的一天的日程,从00:00到23:59
+2. 睡眠时间可以跨天(例如23:00-07:00),系统已支持跨天时间处理
+3. 所有非睡眠活动的时间必须在今天({current_date})范围内
+4. 每个活动必须有明确的开始时间和结束时间,时间段之间不能有空隙
+5. 必须使用正确的字段名:start_time、end_time、activity_type,不要使用 time、activity 等其他字段名
+6. 必须包含早上起床(如07:00-08:00)、上午活动、午餐、下午活动、晚餐、晚上活动、睡觉等
+7. 不要从当前时间开始生成,要从00:00开始生成完整的一整天
+8. 日程要符合人格特点和个人习惯
 
-注意：
-1. 日程要符合人格特点和个人习惯
-2. 生病系统调整（健康度越高越健康）/ Illness system adjustment (higher health is healthier):
+注意:
+1. 生病系统调整(健康度越高越健康) / Illness system adjustment (higher health is healthier):
    - healthy (80-100): 正常日程，可安排工作、运动、娱乐 / Normal schedule, can arrange work, exercise, entertainment
    - recovering (60-79): 减少工作强度，安排康复活动 / Reduce work intensity, arrange recovery activities
    - slightly_ill (40-59): 减少工作，增加休息时间 / Reduce work, increase rest time
    - ill (20-39): 主要安排休息、轻度活动 / Mainly rest and light activities
    - seriously_ill (0-19): 只安排休息、医疗活动、必要的生活活动 / Only rest, medical activities, and essential life activities
-3. 如果疲劳度高（>70），要安排更多休息 / If fatigue is high (>70), arrange more rest
-4. 如果饥饿度高（>70），要优先安排用餐 / If hunger is high (>70), prioritize meals
-5. 节假日可以安排更多休闲活动 / Holidays can have more leisure activities
-6. 确保三餐时间合理 / Ensure reasonable meal times
-7. 确保有足够的睡眠时间 / Ensure sufficient sleep time
-8. 生病时可以安排医疗活动（medical）和休息活动（rest）/ When ill, can arrange medical activities and rest
-9. 日程应该包含8-15个活动，覆盖一整天 / Schedule should contain 8-15 activities covering the whole day
-10. 睡觉时间应该安排在晚上（如22:00-23:59），不要安排到明天凌晨 / Sleep time should be scheduled in the evening (e.g., 22:00-23:59), not tomorrow morning
-11. 时间段必须连续，不能重叠或遗漏 / Time slots must be continuous, no overlaps or gaps
+2. 如果疲劳度高(>70),要安排更多休息 / If fatigue is high (>70), arrange more rest
+3. 如果饥饿度高(>70),要优先安排用餐 / If hunger is high (>70), prioritize meals
+4. 节假日可以安排更多休闲活动 / Holidays can have more leisure activities
+5. 确保三餐时间合理 / Ensure reasonable meal times
+6. 确保有足够的睡眠时间 / Ensure sufficient sleep time
+7. 生病时可以安排医疗活动(medical)和休息活动(rest) / When ill, can arrange medical activities and rest
+8. 日程应该包含8-15个活动,覆盖一整天 / Schedule should contain 8-15 activities covering the whole day
+9. 睡觉时间应该安排在晚上(如22:00-23:59),不要安排到明天凌晨 / Sleep time should be scheduled in the evening (e.g., 22:00-23:59), not tomorrow morning
+10. 时间段必须连续,不能重叠或遗漏 / Time slots must be continuous, no overlaps or gaps
 
 JSON格式示例：
 ```json
 [
-  {
+  {{
     "start_time": "00:00",
     "end_time": "08:00",
     "activity_type": "sleep",
     "description": "计划在床上睡觉",
     "priority": 5
-  },
-  {
+  }},
+  {{
     "start_time": "08:00",
     "end_time": "09:00",
     "activity_type": "meal",
     "description": "安排早餐时间",
     "priority": 4
-  }
+  }}
 ]
 ```
 
@@ -1407,9 +1688,6 @@ verbose = false
         # 检查并生成包含提示词的配置文件（如果需要）
         self._ensure_config_with_prompts()
 
-        # Configure logging based on config file / 根据配置文件配置日志
-        self._configure_logging()
-
         # Event and task management / 事件和任务管理
         self._stop_event = asyncio.Event()
         self._scheduler_task: Optional[asyncio.Task] = None
@@ -1419,17 +1697,11 @@ verbose = false
         # State management / 状态管理
         self._state = LifeState()
         self._state_lock = asyncio.Lock()
+        self._is_dirty = False  # 脏数据标志位 / Dirty flag for state changes
 
         # APIs / API
         self._time_api = TimeAPI(self.get_config("time_api", {}))
         self._holiday_api = HolidayAPI(self.get_config("holiday_api", {}))
-
-        # Social Network / 社交网络
-        self._social_network = SocialNetwork(
-            self._state,
-            self.get_config("social_network", {}),
-            self._state_lock
-        )
 
         # Available models / 可用模型
         self._available_models = llm_api.get_available_models()
@@ -1440,26 +1712,18 @@ verbose = false
         self._state_file = self._data_dir / self.get_config("state.filename", "state.json")
         self._data_dir.mkdir(exist_ok=True)
 
-        logger.info("LifeSimulationPlugin initialized")
+        # Database path / 数据库路径
+        self._db_file = self._data_dir / "social_network.db"
 
-    def _configure_logging(self):
-        """配置日志级别 / Configure logging level"""
-        import logging
-        
-        log_level = self.get_config("logging.level", "INFO").upper()
-        verbose = self.get_config("logging.verbose", False)
-        
-        # 如果verbose为true，强制使用DEBUG级别 / If verbose is true, force DEBUG level
-        if verbose:
-            log_level = "DEBUG"
-        
-        # 设置日志级别 / Set log level
-        try:
-            logger.setLevel(log_level)
-            logger.info(f"Logging level set to: {log_level}")
-        except ValueError as e:
-            logger.warning(f"Invalid log level: {log_level}, using INFO instead")
-            logger.setLevel(logging.INFO)
+        # Social Network / 社交网络
+        self._social_network = SocialNetwork(
+            self._state,
+            self.get_config("social_network", {}),
+            self._state_lock,
+            str(self._db_file)
+        )
+
+        logger.info("LifeSimulationPlugin initialized")
 
     def get_plugin_components(self) -> List[Tuple[ComponentInfo, type]]:
         """获取插件组件 / Get plugin components"""
@@ -1491,6 +1755,146 @@ verbose = false
             components.append((SocialNetworkCommand.get_command_info(), SocialNetworkCommand))
 
         return components
+
+    async def _generate_with_retry(
+        self,
+        prompt: str,
+        model_config: Any,
+        temperature: float = 0.7,
+        max_tokens: int = 1000,
+        context: str = "generation",
+        expected_type: str = "dict",
+        max_retries: int = 3
+    ) -> Optional[Union[Dict, List]]:
+        """使用重试机制生成内容并解析JSON / Generate content with retry mechanism and JSON parsing
+        
+        Args:
+            prompt: 提示词 / Prompt
+            model_config: 模型配置 / Model configuration
+            temperature: 温度 / Temperature
+            max_tokens: 最大token数 / Max tokens
+            context: 上下文描述（用于日志）/ Context description (for logging)
+            expected_type: 期望的返回类型 ("dict" 或 "list") / Expected return type ("dict" or "list")
+            max_retries: 最大重试次数 / Maximum retry attempts
+            
+        Returns:
+            解析后的JSON对象，失败返回None / Parsed JSON object, or None on failure
+        """
+        for attempt in range(max_retries):
+            try:
+                # 调用LLM / Call LLM
+                success, response, reasoning, model_used = await llm_api.generate_with_model(
+                    prompt=prompt,
+                    model_config=model_config,
+                    temperature=temperature,
+                    max_tokens=max_tokens
+                )
+                
+                if not success:
+                    logger.error(f"[{context}] LLM generation failed (attempt {attempt + 1}/{max_retries}): {response}")
+                    if attempt < max_retries - 1:
+                        await asyncio.sleep(1 * (attempt + 1))  # 指数退避 / Exponential backoff
+                        continue
+                    return None
+                
+                # 清理响应 / Clean response
+                cleaned_response = response.strip()
+                
+                # 移除 markdown 代码块标记 / Remove markdown code block markers
+                if cleaned_response.startswith("```json"):
+                    cleaned_response = cleaned_response[7:]
+                elif cleaned_response.startswith("```"):
+                    cleaned_response = cleaned_response[3:]
+                if cleaned_response.endswith("```"):
+                    cleaned_response = cleaned_response[:-3]
+                cleaned_response = cleaned_response.strip()
+                
+                # 替换中文引号为英文引号 / Replace Chinese quotes with English quotes
+                cleaned_response = cleaned_response.replace('"', '"').replace('"', '"')
+                cleaned_response = cleaned_response.replace(''', "'").replace(''', "'")
+                
+                # 替换中文标点符号为英文标点 / Replace Chinese punctuation with English punctuation
+                cleaned_response = cleaned_response.replace('，', ',')  # 中文逗号
+                cleaned_response = cleaned_response.replace('：', ':')  # 中文冒号
+                cleaned_response = cleaned_response.replace('；', ';')  # 中文分号
+                cleaned_response = cleaned_response.replace('！', '!')  # 中文感叹号
+                cleaned_response = cleaned_response.replace('？', '?')  # 中文问号
+                cleaned_response = cleaned_response.replace('（', '(')  # 中文左括号
+                cleaned_response = cleaned_response.replace('）', ')')  # 中文右括号
+                cleaned_response = cleaned_response.replace('【', '[')  # 中文左方括号
+                cleaned_response = cleaned_response.replace('】', ']')  # 中文右方括号
+                cleaned_response = cleaned_response.replace('｛', '{')  # 全角左花括号
+                cleaned_response = cleaned_response.replace('｝', '}')  # 全角右花括号
+                
+                # 尝试解析 JSON / Try to parse JSON
+                try:
+                    result = json.loads(cleaned_response)
+                    
+                    # 验证类型 / Validate type
+                    if expected_type == "dict" and not isinstance(result, dict):
+                        logger.warning(f"[{context}] Expected dict but got {type(result).__name__} (attempt {attempt + 1}/{max_retries})")
+                        if attempt < max_retries - 1:
+                            continue
+                        return None
+                    elif expected_type == "list" and not isinstance(result, list):
+                        logger.warning(f"[{context}] Expected list but got {type(result).__name__} (attempt {attempt + 1}/{max_retries})")
+                        if attempt < max_retries - 1:
+                            continue
+                        return None
+                    
+                    logger.debug(f"[{context}] Successfully parsed JSON on attempt {attempt + 1}")
+                    return result
+                    
+                except json.JSONDecodeError as e:
+                    logger.warning(f"[{context}] JSON parse error (attempt {attempt + 1}/{max_retries}): {e}")
+                    logger.debug(f"[{context}] Failed response (first 500 chars): {cleaned_response[:500]}")
+                    
+                    # 尝试修复常见的 JSON 错误 / Try to fix common JSON errors
+                    try:
+                        # 移除尾随逗号 / Remove trailing commas
+                        fixed_response = cleaned_response.replace(',\n}', '\n}').replace(',\n]', '\n]')
+                        fixed_response = fixed_response.replace(', }', '}').replace(', ]', ']')
+                        result = json.loads(fixed_response)
+                        logger.info(f"[{context}] Successfully parsed JSON after fixing trailing commas")
+                        return result
+                    except json.JSONDecodeError:
+                        # 尝试使用正则提取JSON / Try to extract JSON using regex
+                        import re
+                        try:
+                            if expected_type == "list":
+                                # 提取JSON数组 / Extract JSON array
+                                json_match = re.search(r'\[.*\]', cleaned_response, re.DOTALL)
+                                if json_match:
+                                    extracted_json = json_match.group(0)
+                                    result = json.loads(extracted_json)
+                                    logger.info(f"[{context}] Successfully extracted and parsed JSON array using regex")
+                                    return result
+                            elif expected_type == "dict":
+                                # 提取JSON对象 / Extract JSON object
+                                json_match = re.search(r'\{.*\}', cleaned_response, re.DOTALL)
+                                if json_match:
+                                    extracted_json = json_match.group(0)
+                                    result = json.loads(extracted_json)
+                                    logger.info(f"[{context}] Successfully extracted and parsed JSON object using regex")
+                                    return result
+                        except (json.JSONDecodeError, AttributeError) as extract_error:
+                            logger.debug(f"[{context}] Regex extraction also failed: {extract_error}")
+                        
+                        if attempt < max_retries - 1:
+                            logger.info(f"[{context}] Retrying with modified prompt...")
+                            await asyncio.sleep(1 * (attempt + 1))
+                            continue
+                        logger.error(f"[{context}] Failed to parse JSON after {max_retries} attempts")
+                        return None
+                        
+            except Exception as e:
+                logger.error(f"[{context}] Unexpected error (attempt {attempt + 1}/{max_retries}): {e}", exc_info=True)
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(1 * (attempt + 1))
+                    continue
+                return None
+        
+        return None
 
     # ============================================================
     # Task Management / 任务管理
@@ -1565,6 +1969,11 @@ verbose = false
         self._stop_event.clear()
         self._scheduler_task = self._create_tracked_task(self._scheduler_loop(), "scheduler_loop")
 
+        # Initialize database / 初始化数据库
+        if hasattr(self, '_social_network') and hasattr(self._social_network, '_db'):
+            await self._social_network._db._ensure_db_initialized()
+            logger.info("[STARTUP] Database initialized")
+
         # Load state / 加载状态
         await self._load_state()
 
@@ -1578,9 +1987,17 @@ verbose = false
             date_str = now.strftime("%Y-%m-%d")
             if self._state.schedule_generated_date != date_str:
                 await self._generate_schedule()
+                # 立即保存状态 / Save state immediately
+                if self._is_dirty:
+                    await self._save_state()
+                    logger.info("[STARTUP] Saved state after schedule generation")
             elif not self._state.schedule:
                 # 如果没有日程，立即生成 / If no schedule, generate immediately
                 await self._generate_schedule()
+                # 立即保存状态 / Save state immediately
+                if self._is_dirty:
+                    await self._save_state()
+                    logger.info("[STARTUP] Saved state after schedule generation")
 
     async def stop_scheduler(self):
         """停止调度器 / Stop scheduler"""
@@ -1610,7 +2027,7 @@ verbose = false
         logger.info("Life simulation scheduler stopped")
 
     async def _scheduler_loop(self):
-        """调度器循环 / Scheduler loop"""
+        """调度器循环 / Scheduler loop - 对齐到整分钟执行"""
         update_interval = self.get_config("plugin.update_interval", 60)
         auto_save_interval = self.get_config("state.auto_save_interval", 300)
         last_save_time = 0
@@ -1620,14 +2037,32 @@ verbose = false
                 # Update states / 更新状态
                 await self._update_states()
 
-                # Auto-save / 自动保存
+                # Auto-save / 自动保存（脏数据检测机制）
                 current_time = datetime.now().timestamp()
                 if auto_save_interval > 0 and current_time - last_save_time >= auto_save_interval:
-                    await self._save_state()
-                    last_save_time = current_time
+                    # 只有当数据发生实质性改变时才保存 / Only save if data has changed
+                    if self._is_dirty:
+                        await self._save_state()
+                        last_save_time = current_time
+                        logger.debug("[STATE] Auto-saved state (dirty flag was set)")
+                    else:
+                        logger.debug("[STATE] Skipping auto-save (no changes since last save)")
 
-                # Wait for next update / 等待下一次更新
-                await asyncio.wait_for(self._stop_event.wait(), timeout=update_interval)
+                    # 同时刷新数据库脏数据 / Also flush database dirty data
+                    if hasattr(self, '_social_network') and hasattr(self._social_network, '_db'):
+                        await self._social_network._db.flush_dirty_data()
+
+                # 对齐到整分钟等待 / Align to minute boundary
+                # 计算距离下一个整分钟的秒数
+                now = datetime.now()
+                seconds_to_next_minute = 60 - now.second - (now.microsecond / 1000000)
+
+                # 等待到下一个整分钟 / Wait until next minute
+                try:
+                    await asyncio.wait_for(self._stop_event.wait(), timeout=seconds_to_next_minute)
+                except asyncio.TimeoutError:
+                    # 超时，继续下一次循环 / Timeout, continue to next iteration
+                    pass
             except asyncio.TimeoutError:
                 continue
             except Exception as e:
@@ -1654,10 +2089,12 @@ verbose = false
             match = re.search(pattern, default_config, re.MULTILINE | re.DOTALL)
             if match:
                 prompt = match.group(1)
-                logger.info(f"Using default prompt for {prompt_type}")
+                logger.info(f"Using default prompt for {prompt_type}, length: {len(prompt)}")
             else:
                 logger.error(f"Prompt not found in default config either: {prompt_type}")
                 return ""
+        else:
+            logger.info(f"Using prompt from config for {prompt_type}, length: {len(prompt)}")
         
         if prompt:
             logger.debug(f"Prompt type: {prompt_type}, kwargs keys: {list(kwargs.keys())}")
@@ -1667,6 +2104,7 @@ verbose = false
                 return formatted_prompt
             except KeyError as e:
                 logger.warning(f"Failed to format prompt {prompt_type}, missing key: {e}")
+                logger.warning(f"Available kwargs: {list(kwargs.keys())}")
                 return prompt
         else:
             logger.warning(f"Prompt not found: {prompt_type}")
@@ -1711,6 +2149,167 @@ verbose = false
             return list(self._available_models.values())[0]
         return None
 
+    def _parse_json_response(self, response: str, context: str = "JSON") -> Optional[Any]:
+        """解析JSON响应，自动处理常见格式问题 / Parse JSON response, automatically handle common format issues
+        
+        Args:
+            response: 原始响应字符串 / Raw response string
+            context: 上下文描述，用于日志 / Context description for logging
+            
+        Returns:
+            解析后的JSON对象，如果失败则返回None / Parsed JSON object, or None if failed
+        """
+        try:
+            # 移除 markdown 代码块标记 / Remove markdown code block markers
+            cleaned_response = response.strip()
+            if cleaned_response.startswith("```json"):
+                cleaned_response = cleaned_response[7:]
+            elif cleaned_response.startswith("```"):
+                cleaned_response = cleaned_response[3:]
+            if cleaned_response.endswith("```"):
+                cleaned_response = cleaned_response[:-3]
+            cleaned_response = cleaned_response.strip()
+
+            # 替换中文引号为英文引号，避免 JSON 解析错误
+            cleaned_response = cleaned_response.replace('"', '"').replace('"', '"')
+            cleaned_response = cleaned_response.replace(''', "'").replace(''', "'")
+
+            # 尝试解析 JSON
+            try:
+                result = json.loads(cleaned_response)
+                logger.debug(f"Successfully parsed {context} JSON")
+                return result
+            except json.JSONDecodeError as e:
+                logger.warning(f"Failed to parse {context} JSON after cleaning: {e}")
+                logger.debug(f"Cleaned response (first 500 chars): {cleaned_response[:500] if cleaned_response else 'empty'}")
+                logger.debug(f"Original response (first 500 chars): {response[:500] if response else 'empty'}")
+                # 显示错误位置附近的内容
+                if hasattr(e, 'pos') and e.pos < len(cleaned_response):
+                    start_pos = max(0, e.pos - 50)
+                    end_pos = min(len(cleaned_response), e.pos + 50)
+                    logger.error(f"Error context: ...{cleaned_response[start_pos:end_pos]}...")
+                
+                # 尝试修复常见的 JSON 错误
+                try:
+                    # 修复尾随逗号
+                    cleaned_response = cleaned_response.replace(',\n}', '\n}').replace(',\n]', '\n]')
+                    cleaned_response = cleaned_response.replace(', }', '}').replace(', ]', ']')
+                    
+                    # 修复可能的注释
+                    import re
+                    cleaned_response = re.sub(r'//.*?\n', '\n', cleaned_response)
+                    cleaned_response = re.sub(r'/\*.*?\*/', '', cleaned_response, flags=re.DOTALL)
+                    
+                    # 尝试查找第一个 { 和最后一个 }，提取JSON部分
+                    start_idx = cleaned_response.find('{')
+                    end_idx = cleaned_response.rfind('}')
+                    if start_idx != -1 and end_idx != -1:
+                        cleaned_response = cleaned_response[start_idx:end_idx + 1]
+                        logger.debug(f"Extracted JSON from response")
+                    
+                    result = json.loads(cleaned_response)
+                    logger.info(f"Successfully parsed {context} JSON after fixing common errors")
+                    return result
+                except json.JSONDecodeError as e2:
+                    logger.error(f"Failed to parse {context} JSON even after fixing: {e2}")
+                    if hasattr(e2, 'pos') and e2.pos < len(cleaned_response):
+                        start_pos = max(0, e2.pos - 50)
+                        end_pos = min(len(cleaned_response), e2.pos + 50)
+                        logger.error(f"Error context (after fix): ...{cleaned_response[start_pos:end_pos]}...")
+                    return None
+        except Exception as e:
+            logger.error(f"Unexpected error parsing {context}: {e}", exc_info=True)
+            return None
+
+    async def _generate_with_retry(
+        self,
+        prompt: str,
+        model_config: Any,
+        temperature: float,
+        max_tokens: int,
+        context: str = "data",
+        expected_type: str = "dict"
+    ) -> Optional[Any]:
+        """执行带有重试机制的 LLM 调用和 JSON 解析 / Execute LLM call with retry mechanism and JSON parsing
+        
+        Args:
+            prompt: 提示词 / Prompt
+            model_config: 模型配置 / Model configuration
+            temperature: 温度参数 / Temperature parameter
+            max_tokens: 最大 token 数 / Max tokens
+            context: 上下文描述，用于日志 / Context description for logging
+            expected_type: 期望的返回类型（dict 或 list） / Expected return type (dict or list)
+            
+        Returns:
+            解析后的数据，如果失败则返回 None / Parsed data, or None if failed
+        """
+        retry_count = self.get_config("ai.json_retry_count", 2)
+        retry_delay = self.get_config("ai.json_retry_delay", 1.0)
+        
+        logger.info(f"[RETRY] Starting {context} generation with max {retry_count} retries")
+        
+        for attempt in range(retry_count + 1):  # +1 for initial attempt
+            try:
+                # 调用 LLM / Call LLM
+                success, response, reasoning, model_used = await llm_api.generate_with_model(
+                    prompt=prompt,
+                    model_config=model_config,
+                    temperature=temperature,
+                    max_tokens=max_tokens
+                )
+                
+                if not success:
+                    logger.error(f"[RETRY] Attempt {attempt + 1}/{retry_count + 1}: Failed to generate {context}: {response}")
+                    if attempt < retry_count:
+                        await asyncio.sleep(retry_delay)
+                        continue
+                    return None
+                
+                logger.info(f"[RETRY] Attempt {attempt + 1}/{retry_count + 1}: LLM response received (length: {len(response)})")
+                
+                # 解析 JSON / Parse JSON
+                result = self._parse_json_response(response, context)
+                
+                if result is None:
+                    logger.warning(f"[RETRY] Attempt {attempt + 1}/{retry_count + 1}: Failed to parse {context} JSON")
+                    if attempt < retry_count:
+                        logger.info(f"[RETRY] Waiting {retry_delay}s before retry...")
+                        await asyncio.sleep(retry_delay)
+                        continue
+                    logger.error(f"[RETRY] All {retry_count + 1} attempts failed for {context}")
+                    return None
+                
+                # 检查返回类型 / Check return type
+                if expected_type == "dict" and not isinstance(result, dict):
+                    logger.warning(f"[RETRY] Attempt {attempt + 1}/{retry_count + 1}: Expected dict but got {type(result)}")
+                    if attempt < retry_count:
+                        await asyncio.sleep(retry_delay)
+                        continue
+                    return None
+                elif expected_type == "list" and not isinstance(result, list):
+                    logger.warning(f"[RETRY] Attempt {attempt + 1}/{retry_count + 1}: Expected list but got {type(result)}")
+                    if attempt < retry_count:
+                        await asyncio.sleep(retry_delay)
+                        continue
+                    return None
+                
+                # 成功 / Success
+                if attempt > 0:
+                    logger.info(f"[RETRY] Successfully generated {context} after {attempt + 1} attempts")
+                else:
+                    logger.info(f"[RETRY] Successfully generated {context} on first attempt")
+                
+                return result
+                
+            except Exception as e:
+                logger.error(f"[RETRY] Attempt {attempt + 1}/{retry_count + 1}: Unexpected error: {e}", exc_info=True)
+                if attempt < retry_count:
+                    await asyncio.sleep(retry_delay)
+                    continue
+                return None
+        
+        return None
+
     # ============================================================
     # AI Generation / AI生成
     # ============================================================
@@ -1718,14 +2317,18 @@ verbose = false
     async def _generate_schedule(self) -> List[Dict[str, Any]]:
         """生成日程 / Generate schedule"""
         try:
+            logger.info("[SCHEDULE] Starting schedule generation...")
             now = await self._time_api.get_current_time()
             date_str = now.strftime("%Y-%m-%d")
             time_str = now.strftime("%H:%M")
             day_of_week = now.strftime("%A")
             is_weekend = now.weekday() >= 5
 
+            logger.debug(f"[SCHEDULE] Current time: {date_str} {time_str}, Day: {day_of_week}, Weekend: {is_weekend}")
+
             # Check holiday / 检查节日
             holiday, is_holiday = await self._holiday_api.get_holiday(now.date())
+            logger.debug(f"[SCHEDULE] Holiday check: {holiday}, Is holiday: {is_holiday}")
 
             async with self._state_lock:
                 self._state.current_holiday = holiday
@@ -1733,9 +2336,26 @@ verbose = false
 
             # Get personality / 获取人格
             personality = self._get_personality()
+            logger.debug(f"[SCHEDULE] Personality: {personality[:100]}...")
 
             # Get habits / 获取习惯
             habits_text = await self._get_habits_text()
+            logger.debug(f"[SCHEDULE] Habits: {habits_text[:100]}...")
+
+            # Log current state / 记录当前状态
+            async with self._state_lock:
+                logger.info(f"[SCHEDULE] Current state - Health: {self._state.health_status.value} ({self._state.health}), Fatigue: {self._state.fatigue}, Hunger: {self._state.hunger}")
+                logger.info(f"[SCHEDULE] Illness info - Name: {self._state.illness_name}, Reason: {self._state.illness_reason}, Symptoms: {self._state.illness_symptoms}, Treatment: {self._state.illness_treatment}")
+
+            # Build illness info / 构建疾病信息
+            illness_info = ""
+            if self._state.illness_name:
+                illness_info = f"""疾病信息：
+- 疾病名称：{self._state.illness_name}
+- 生病原因：{self._state.illness_reason}
+- 症状描述：{self._state.illness_symptoms}
+- 治疗建议：{self._state.illness_treatment}
+"""
 
             # Build prompt / 构建提示词
             prompt = self._get_prompt(
@@ -1747,10 +2367,7 @@ verbose = false
                 is_holiday=is_holiday,
                 holiday_name=holiday,
                 health_status=self._state.health_status.value,
-                illness_name=self._state.illness_name,
-                illness_reason=self._state.illness_reason,
-                illness_symptoms=self._state.illness_symptoms,
-                illness_treatment=self._state.illness_treatment,
+                illness_info=illness_info,
                 fatigue_level=self._state.fatigue,
                 hunger_level=self._state.hunger,
                 personality=personality,
@@ -1761,56 +2378,35 @@ verbose = false
             model_name = self.get_config("ai.schedule_model", "replyer")
             model_config = self._get_model_config(model_name)
             if not model_config:
-                logger.error(f"Model config not found for {model_name}")
+                logger.error(f"[SCHEDULE] Model config not found for {model_name}")
                 return []
 
             temperature = self.get_config("ai.temperature", 0.7)
-            max_tokens = self.get_config("ai.max_tokens", 2500)
+            
+            # 动态计算max_tokens / Dynamically calculate max_tokens
+            # 预估: 15个活动 × 每个200 tokens = 3000 tokens
+            # 加上安全余量 500 tokens
+            base_max_tokens = self.get_config("ai.max_tokens", 2500)
+            
+            # 根据prompt长度调整 / Adjust based on prompt length
+            # 一般来说,日程生成需要3000-4000 tokens才能完整输出
+            estimated_schedule_tokens = 3500  # 15个活动的预估token数
+            dynamic_max_tokens = max(base_max_tokens, estimated_schedule_tokens)
+            
+            logger.info(f"[SCHEDULE] Calling LLM - Model: {model_name}, Temperature: {temperature}, Max tokens: {dynamic_max_tokens} (base: {base_max_tokens}, dynamic adjustment: +{dynamic_max_tokens - base_max_tokens})")
+            logger.debug(f"[SCHEDULE] Prompt (first 500 chars): {prompt[:500]}...")
 
-            success, response, reasoning, model_used = await llm_api.generate_with_model(
+            # 使用重试机制生成日程 / Use retry mechanism to generate schedule
+            schedule = await self._generate_with_retry(
                 prompt=prompt,
                 model_config=model_config,
                 temperature=temperature,
-                max_tokens=max_tokens
+                max_tokens=dynamic_max_tokens,
+                context="schedule",
+                expected_type="list"
             )
 
-            if not success:
-                logger.error(f"Failed to generate schedule: {response}")
-                return []
-
-            # Parse response / 解析响应
-            try:
-                # 移除 markdown 代码块标记 / Remove markdown code block markers
-                cleaned_response = response.strip()
-                if cleaned_response.startswith("```json"):
-                    cleaned_response = cleaned_response[7:]
-                elif cleaned_response.startswith("```"):
-                    cleaned_response = cleaned_response[3:]
-                if cleaned_response.endswith("```"):
-                    cleaned_response = cleaned_response[:-3]
-                cleaned_response = cleaned_response.strip()
-
-                # 替换中文引号为英文引号，避免 JSON 解析错误
-                cleaned_response = cleaned_response.replace('"', '"').replace('"', '"')
-                cleaned_response = cleaned_response.replace(''', "'").replace(''', "'")
-
-                # 尝试解析 JSON
-                try:
-                    schedule = json.loads(cleaned_response)
-                except json.JSONDecodeError as e:
-                    logger.error(f"Failed to parse schedule JSON after cleaning: {e}")
-                    logger.error(f"Cleaned response (first 1000 chars): {cleaned_response[:1000] if cleaned_response else 'empty'}")
-                    logger.error(f"Original response (first 1000 chars): {response[:1000] if response else 'empty'}")
-                    # 尝试修复常见的 JSON 错误
-                    try:
-                        cleaned_response = cleaned_response.replace(',\n}', '\n}').replace(',\n]', '\n]')
-                        cleaned_response = cleaned_response.replace(', }', '}').replace(', ]', ']')
-                        schedule = json.loads(cleaned_response)
-                        logger.info("Successfully parsed schedule JSON after fixing trailing commas")
-                    except json.JSONDecodeError as e2:
-                        logger.error(f"Failed to parse schedule JSON even after fixing commas: {e2}")
-                        return []
-                if isinstance(schedule, list):
+            if schedule and isinstance(schedule, list):
                     # 转换旧格式到新格式 / Convert old format to new format
                     converted_schedule = []
                     for i, activity in enumerate(schedule):
@@ -1836,7 +2432,7 @@ verbose = false
                             else:
                                 converted_activity["end_time"] = "23:59"
                         else:
-                            logger.warning(f"Activity {i} missing time fields, skipping")
+                            logger.warning(f"[SCHEDULE] Activity {i} missing time fields, skipping")
                             continue
                         
                         # 处理活动类型字段 / Handle activity type field
@@ -1851,12 +2447,24 @@ verbose = false
                         converted_schedule.append(converted_activity)
                     
                     schedule = converted_schedule
-                    logger.info(f"Converted schedule format: {len(schedule)} activities")
-                    
+                    logger.info(f"[SCHEDULE] Converted schedule format: {len(schedule)} activities")
+
                     async with self._state_lock:
+                        # 补全日程空隙 / Fill schedule gaps
+                        schedule = self._fill_schedule_gaps(schedule)
                         self._state.schedule = schedule
                         self._state.schedule_generated_date = date_str
+                        self._is_dirty = True  # 标记状态已更改，需要保存
                     logger.info(f"Generated schedule for {date_str}: {len(schedule)} activities")
+                    
+                    # 检查日程中是否包含医疗活动 / Check if schedule contains medical activities
+                    medical_activities = [a for a in schedule if a.get("activity_type") == "medical"]
+                    if medical_activities:
+                        logger.info(f"[SCHEDULE] Found {len(medical_activities)} medical activities in schedule")
+                        for act in medical_activities:
+                            logger.info(f"[SCHEDULE] Medical activity: {act.get('start_time', '')}-{act.get('end_time', '')} - {act.get('description', '')}")
+                    else:
+                        logger.warning("[SCHEDULE] No medical activities found in schedule (expected when ill)")
 
                     # 校验当前时间，设置当前活动 / Check current time and set current activity
                     try:
@@ -1879,12 +2487,23 @@ verbose = false
                                     start_time_minutes = start_hour * 60 + start_minute
                                     end_time_minutes = end_hour * 60 + end_minute
 
+                                    # 处理跨天情况 / Handle cross-day case
+                                    is_cross_day = end_time_minutes < start_time_minutes
+                                    in_time_range = False
+                                    
+                                    if is_cross_day:
+                                        # 跨天:当前时间 >= 开始时间 或 当前时间 < 结束时间
+                                        in_time_range = (current_time_minutes >= start_time_minutes) or (current_time_minutes < end_time_minutes)
+                                    else:
+                                        # 不跨天:正常比较
+                                        in_time_range = start_time_minutes <= current_time_minutes < end_time_minutes
+
                                     # 判断当前时间是否在时间段内 / Check if current time is within time slot
-                                    if start_time_minutes <= current_time_minutes < end_time_minutes:
+                                    if in_time_range:
                                         current_activity_obj = activity
                                         break
                                 except (ValueError, IndexError) as e:
-                                    logger.warning(f"Failed to parse activity time {start_time_str}-{end_time_str}: {e}")
+                                    logger.warning(f"[SCHEDULE] Failed to parse activity time {start_time_str}-{end_time_str}: {e}")
 
                         # 设置当前活动 / Set current activity
                         if current_activity_obj:
@@ -1892,15 +2511,13 @@ verbose = false
                                 self._state.current_activity = current_activity_obj.get("activity_type", "idle")
                                 self._state.current_activity_description = current_activity_obj.get("description", "")
                                 self._state.last_activity_time = time.time()
-                            logger.info(f"Set current activity based on schedule: {self._state.current_activity} at {current_activity_obj.get('start_time', '')}")
+                            logger.info(f"[SCHEDULE] Set current activity based on schedule: {self._state.current_activity} at {current_activity_obj.get('start_time', '')}-{current_activity_obj.get('end_time', '')}")
                         else:
-                            logger.warning("No matching activity found after schedule generation")
+                            logger.warning("[SCHEDULE] No matching activity found after schedule generation")
                     except Exception as e:
-                        logger.warning(f"Failed to check current time for schedule: {e}")
+                        logger.warning(f"[SCHEDULE] Failed to check current time for schedule: {e}")
 
                     return schedule
-            except json.JSONDecodeError:
-                logger.error(f"Failed to parse schedule JSON: {response}")
 
         except Exception as e:
             logger.error(f"Failed to generate schedule: {e}", exc_info=True)
@@ -1916,16 +2533,25 @@ verbose = false
                               False: 强制模式，忽略概率检查（用于调试命令）
         """
         try:
+            logger.info("[EVENT] Starting random event generation...")
             now = await self._time_api.get_current_time()
             date_str = now.strftime("%Y-%m-%d")
             time_str = now.strftime("%H:%M")
             day_of_week = now.strftime("%A")
 
+            logger.debug(f"[EVENT] Current time: {date_str} {time_str}, Day: {day_of_week}")
+
             # Get personality / 获取人格
             personality = self._get_personality()
+            logger.debug(f"[EVENT] Personality: {personality[:100]}...")
 
             # Get habits / 获取习惯
             habits_text = await self._get_habits_text()
+            logger.debug(f"[EVENT] Habits: {habits_text[:100]}...")
+
+            # Log current state / 记录当前状态
+            async with self._state_lock:
+                logger.info(f"[EVENT] Current state - Health: {self._state.health_status.value} ({self._state.health}), Fatigue: {self._state.fatigue}, Hunger: {self._state.hunger}, Emotion: {self._state.current_emotion}")
 
             # Build prompt / 构建提示词
             prompt = self._get_prompt(
@@ -1951,64 +2577,29 @@ verbose = false
             temperature = self.get_config("ai.temperature", 0.7)
             max_tokens = self.get_config("ai.max_tokens", 2500)
 
-            success, response, reasoning, model_used = await llm_api.generate_with_model(
+            # 使用重试机制生成事件 / Use retry mechanism to generate event
+            event = await self._generate_with_retry(
                 prompt=prompt,
                 model_config=model_config,
                 temperature=temperature,
-                max_tokens=max_tokens
+                max_tokens=max_tokens,
+                context="event",
+                expected_type="dict"
             )
 
-            if not success:
-                logger.error(f"Failed to generate event: {response}")
-                return None
-
-            # Parse response / 解析响应
-            try:
-                # 移除 markdown 代码块标记 / Remove markdown code block markers
-                cleaned_response = response.strip()
-                if cleaned_response.startswith("```json"):
-                    cleaned_response = cleaned_response[7:]
-                elif cleaned_response.startswith("```"):
-                    cleaned_response = cleaned_response[3:]
-                if cleaned_response.endswith("```"):
-                    cleaned_response = cleaned_response[:-3]
-                cleaned_response = cleaned_response.strip()
-
-                # 替换中文引号为英文引号，避免 JSON 解析错误
-                cleaned_response = cleaned_response.replace('"', '"').replace('"', '"')
-                cleaned_response = cleaned_response.replace(''', "'").replace(''', "'")
-
-                # 尝试解析 JSON
-                try:
-                    event = json.loads(cleaned_response)
-                except json.JSONDecodeError as e:
-                    logger.error(f"Failed to parse event JSON after cleaning: {e}")
-                    logger.error(f"Cleaned response (first 1000 chars): {cleaned_response[:1000] if cleaned_response else 'empty'}")
-                    logger.error(f"Original response (first 1000 chars): {response[:1000] if response else 'empty'}")
-                    # 尝试修复常见的 JSON 错误
-                    try:
-                        cleaned_response = cleaned_response.replace(',\n}', '\n}').replace(',\n]', '\n]')
-                        cleaned_response = cleaned_response.replace(', }', '}').replace(', ]', ']')
-                        event = json.loads(cleaned_response)
-                        logger.info("Successfully parsed event JSON after fixing trailing commas")
-                    except json.JSONDecodeError as e2:
-                        logger.error(f"Failed to parse event JSON even after fixing commas: {e2}")
-                        return None
-                if isinstance(event, dict):
-                    # Check probability / 检查概率（仅在正常模式下）
-                    if check_probability:
-                        probability = event.get("probability", 0.0)
-                        if random.random() < probability:
-                            logger.info(f"Generated random event: {event.get('event_name')}")
-                            return event
-                        else:
-                            logger.debug(f"Event generated but probability check failed (probability: {probability})")
-                    else:
-                        # 强制模式，忽略概率检查
-                        logger.info(f"Generated random event (forced): {event.get('event_name')}")
+            if event and isinstance(event, dict):
+                # Check probability / 检查概率（仅在正常模式下）
+                if check_probability:
+                    probability = event.get("probability", 0.0)
+                    if random.random() < probability:
+                        logger.info(f"Generated random event: {event.get('event_name')}")
                         return event
-            except json.JSONDecodeError:
-                logger.error(f"Failed to parse event JSON: {response}")
+                    else:
+                        logger.debug(f"Event generated but probability check failed (probability: {probability})")
+                else:
+                    # 强制模式，忽略概率检查
+                    logger.info(f"Generated random event (forced): {event.get('event_name')}")
+                    return event
 
         except Exception as e:
             logger.error(f"Failed to generate random event: {e}", exc_info=True)
@@ -2018,15 +2609,24 @@ verbose = false
     async def _judge_emotion(self) -> Tuple[str, int, str]:
         """判断情绪 / Judge emotion"""
         try:
+            logger.info("[EMOTION] Starting emotion judgment...")
             now = await self._time_api.get_current_time()
             date_str = now.strftime("%Y-%m-%d")
             time_str = now.strftime("%H:%M")
 
+            logger.debug(f"[EMOTION] Current time: {date_str} {time_str}")
+
             # Get personality / 获取人格
             personality = self._get_personality()
+            logger.debug(f"[EMOTION] Personality: {personality[:100]}...")
 
             # Get recent messages / 获取最近消息
             recent_messages = await self._get_recent_messages()
+            logger.debug(f"[EMOTION] Recent messages (first 200 chars): {recent_messages[:200]}...")
+
+            # Log current state / 记录当前状态
+            async with self._state_lock:
+                logger.info(f"[EMOTION] Current state - Health: {self._state.health_status.value} ({self._state.health}), Fatigue: {self._state.fatigue}, Hunger: {self._state.hunger}, Current activity: {self._state.current_activity}")
 
             # Build prompt / 构建提示词
             prompt = self._get_prompt(
@@ -2051,50 +2651,17 @@ verbose = false
             temperature = self.get_config("ai.temperature", 0.7)
             max_tokens = self.get_config("ai.max_tokens", 500)
 
-            success, response, reasoning, model_used = await llm_api.generate_with_model(
+            # 使用重试机制判断情绪 / Use retry mechanism to judge emotion
+            emotion_data = await self._generate_with_retry(
                 prompt=prompt,
                 model_config=model_config,
                 temperature=temperature,
-                max_tokens=max_tokens
+                max_tokens=max_tokens,
+                context="emotion",
+                expected_type="dict"
             )
 
-            if not success:
-                logger.error(f"Failed to judge emotion: {response}")
-                return "calm", 0, ""
-
-            # Parse response / 解析响应
-            try:
-                # 移除 markdown 代码块标记 / Remove markdown code block markers
-                cleaned_response = response.strip()
-                if cleaned_response.startswith("```json"):
-                    cleaned_response = cleaned_response[7:]
-                elif cleaned_response.startswith("```"):
-                    cleaned_response = cleaned_response[3:]
-                if cleaned_response.endswith("```"):
-                    cleaned_response = cleaned_response[:-3]
-                cleaned_response = cleaned_response.strip()
-
-                # 替换中文引号为英文引号，避免 JSON 解析错误
-                cleaned_response = cleaned_response.replace('"', '"').replace('"', '"')
-                cleaned_response = cleaned_response.replace(''', "'").replace(''', "'")
-
-                # 尝试解析 JSON
-                try:
-                    emotion_data = json.loads(cleaned_response)
-                except json.JSONDecodeError as e:
-                    logger.error(f"Failed to parse emotion JSON after cleaning: {e}")
-                    logger.error(f"Cleaned response (first 1000 chars): {cleaned_response[:1000] if cleaned_response else 'empty'}")
-                    logger.error(f"Original response (first 1000 chars): {response[:1000] if response else 'empty'}")
-                    # 尝试修复常见的 JSON 错误
-                    try:
-                        cleaned_response = cleaned_response.replace(',\n}', '\n}').replace(',\n]', '\n]')
-                        cleaned_response = cleaned_response.replace(', }', '}').replace(', ]', ']')
-                        emotion_data = json.loads(cleaned_response)
-                        logger.info("Successfully parsed emotion JSON after fixing trailing commas")
-                    except json.JSONDecodeError as e2:
-                        logger.error(f"Failed to parse emotion JSON even after fixing commas: {e2}")
-                        return "calm", 0, ""
-                if isinstance(emotion_data, dict):
+            if emotion_data and isinstance(emotion_data, dict):
                     emotion = emotion_data.get("emotion", "calm")
                     intensity = emotion_data.get("intensity", 0)
                     reason = emotion_data.get("reason", "")
@@ -2105,8 +2672,6 @@ verbose = false
                         self._state.emotion_reason = reason
 
                     return emotion, intensity, reason
-            except json.JSONDecodeError:
-                logger.error(f"Failed to parse emotion JSON: {response}")
 
         except Exception as e:
             logger.error(f"Failed to judge emotion: {e}", exc_info=True)
@@ -2123,7 +2688,7 @@ verbose = false
                     self._state.illness_reason = ""
                     self._state.illness_symptoms = ""
                     self._state.illness_treatment = ""
-                logger.info("Health status is healthy, cleared illness information")
+                logger.info("[ILLNESS] Health status is healthy, cleared illness information")
                 return True
 
             now = await self._time_api.get_current_time()
@@ -2159,69 +2724,36 @@ verbose = false
             temperature = self.get_config("ai.temperature", 0.7)
             max_tokens = self.get_config("ai.max_tokens", 500)
 
-            success, response, reasoning, model_used = await llm_api.generate_with_model(
+            # 使用重试机制生成疾病诊断 / Use retry mechanism to generate illness diagnosis
+            illness_data = await self._generate_with_retry(
                 prompt=prompt,
                 model_config=model_config,
                 temperature=temperature,
-                max_tokens=max_tokens
+                max_tokens=max_tokens,
+                context="illness_diagnosis",
+                expected_type="dict"
             )
 
-            if not success:
-                logger.error(f"Failed to diagnose illness: {response}")
+            if illness_data and isinstance(illness_data, dict):
+                illness_name = illness_data.get("illness_name", "")
+                illness_reason = illness_data.get("illness_reason", "")
+                illness_symptoms = illness_data.get("illness_symptoms", "")
+                illness_treatment = illness_data.get("illness_treatment", "")
+
+                async with self._state_lock:
+                    self._state.illness_name = illness_name
+                    self._state.illness_reason = illness_reason
+                    self._state.illness_symptoms = illness_symptoms
+                    self._state.illness_treatment = illness_treatment
+
+                logger.info(f"[ILLNESS] Diagnosed illness: {illness_name}, reason: {illness_reason}")
+                return True
+            else:
+                logger.error("[ILLNESS] Failed to generate illness diagnosis")
                 return False
 
-            # Parse response / 解析响应
-            try:
-                # 移除 markdown 代码块标记 / Remove markdown code block markers
-                cleaned_response = response.strip()
-                if cleaned_response.startswith("```json"):
-                    cleaned_response = cleaned_response[7:]
-                elif cleaned_response.startswith("```"):
-                    cleaned_response = cleaned_response[3:]
-                if cleaned_response.endswith("```"):
-                    cleaned_response = cleaned_response[:-3]
-                cleaned_response = cleaned_response.strip()
-
-                # 替换中文引号为英文引号，避免 JSON 解析错误
-                cleaned_response = cleaned_response.replace('"', '"').replace('"', '"')
-                cleaned_response = cleaned_response.replace(''', "'").replace(''', "'")
-
-                # 尝试解析 JSON
-                try:
-                    illness_data = json.loads(cleaned_response)
-                except json.JSONDecodeError as e:
-                    logger.error(f"Failed to parse illness JSON after cleaning: {e}")
-                    logger.error(f"Cleaned response (first 1000 chars): {cleaned_response[:1000] if cleaned_response else 'empty'}")
-                    logger.error(f"Original response (first 1000 chars): {response[:1000] if response else 'empty'}")
-                    # 尝试修复常见的 JSON 错误
-                    try:
-                        cleaned_response = cleaned_response.replace(',\n}', '\n}').replace(',\n]', '\n]')
-                        cleaned_response = cleaned_response.replace(', }', '}').replace(', ]', ']')
-                        illness_data = json.loads(cleaned_response)
-                        logger.info("Successfully parsed illness JSON after fixing trailing commas")
-                    except json.JSONDecodeError as e2:
-                        logger.error(f"Failed to parse illness JSON even after fixing commas: {e2}")
-                        return False
-
-                if isinstance(illness_data, dict):
-                    illness_name = illness_data.get("illness_name", "")
-                    illness_reason = illness_data.get("illness_reason", "")
-                    illness_symptoms = illness_data.get("illness_symptoms", "")
-                    illness_treatment = illness_data.get("illness_treatment", "")
-
-                    async with self._state_lock:
-                        self._state.illness_name = illness_name
-                        self._state.illness_reason = illness_reason
-                        self._state.illness_symptoms = illness_symptoms
-                        self._state.illness_treatment = illness_treatment
-
-                    logger.info(f"Diagnosed illness: {illness_name}, reason: {illness_reason}")
-                    return True
-            except json.JSONDecodeError:
-                logger.error(f"Failed to parse illness JSON: {response}")
-
         except Exception as e:
-            logger.error(f"Failed to diagnose illness: {e}", exc_info=True)
+            logger.error(f"[ILLNESS] Failed to diagnose illness: {e}", exc_info=True)
 
         return False
 
@@ -2258,143 +2790,35 @@ verbose = false
             temperature = self.get_config("ai.temperature", 0.7)
             max_tokens = self.get_config("ai.max_tokens", 500)
 
-            success, response, reasoning, model_used = await llm_api.generate_with_model(
+            # 使用重试机制生成习惯 / Use retry mechanism to generate habits
+            habits_data = await self._generate_with_retry(
                 prompt=prompt,
                 model_config=model_config,
                 temperature=temperature,
-                max_tokens=max_tokens
+                max_tokens=max_tokens,
+                context="habits",
+                expected_type="dict"
             )
 
-            if not success:
-                logger.error(f"Failed to generate habits: {response}")
-                return False
+            if habits_data and isinstance(habits_data, dict):
+                async with self._state_lock:
+                    self._state.speaking_habits = habits_data.get("speaking_habits", [])
+                    self._state.behavior_habits = habits_data.get("behavior_habits", [])
+                    self._state.interests = habits_data.get("interests", [])
+                    self._state.preferences = habits_data.get("preferences", {})
+                    # 保存人格哈希值 / Save personality hash
+                    self._state.personality_hash = personality_hash
 
-            # Parse response / 解析响应
-            try:
-                # 移除 markdown 代码块标记 / Remove markdown code block markers
-                cleaned_response = response.strip()
+                # Habits are saved to state file, not config file
+                # 习惯已保存到状态文件，不保存到配置文件（避免丢失注释）
+                logger.info(f"Generated habits successfully: {len(self._state.speaking_habits)} speaking habits, {len(self._state.behavior_habits)} behavior habits, {len(self._state.interests)} interests (saved to state file)")
+                logger.info(f"Saved personality hash: {self._state.personality_hash}")
+                return True
+            else:
+                logger.error(f"Invalid habits data type: {type(habits_data)}")
 
-                # 处理各种可能的代码块格式
-                if cleaned_response.startswith("```json"):
-                    cleaned_response = cleaned_response[7:]
-                elif cleaned_response.startswith("```"):
-                    cleaned_response = cleaned_response[3:]
-                
-                # 移除结尾的代码块标记
-                if cleaned_response.endswith("```"):
-                    cleaned_response = cleaned_response[:-3]
-                
-                cleaned_response = cleaned_response.strip()
-
-                # 替换中文引号为英文引号，避免 JSON 解析错误
-                # 使用正则表达式更智能地替换引号
-                import re
-
-                # 先替换所有中文引号为英文引号
-                cleaned_response = cleaned_response.replace('"', '"').replace('"', '"')
-                cleaned_response = cleaned_response.replace(''', "'").replace(''', "'")
-
-                # 尝试查找第一个 { 和最后一个 }，提取JSON部分
-                start_idx = cleaned_response.find('{')
-                end_idx = cleaned_response.rfind('}')
-                if start_idx != -1 and end_idx != -1:
-                    cleaned_response = cleaned_response[start_idx:end_idx + 1]
-                    logger.debug(f"Extracted JSON from response (length: {len(cleaned_response)})")
-                else:
-                    logger.warning(f"No valid JSON structure found in response")
-
-                # 尝试解析 JSON
-                try:
-                    habits_data = json.loads(cleaned_response)
-                except json.JSONDecodeError as e:
-                    logger.error(f"Failed to parse habits JSON after cleaning: {e}")
-                    logger.error(f"Cleaned response (first 1000 chars): {cleaned_response[:1000] if cleaned_response else 'empty'}")
-                    logger.error(f"Original response (first 1000 chars): {response[:1000] if response else 'empty'}")
-
-                    # 尝试修复常见的 JSON 错误
-                    try:
-                        # 修复尾随逗号
-                        cleaned_response = cleaned_response.replace(',\n}', '\n}').replace(',\n]', '\n]')
-                        cleaned_response = cleaned_response.replace(', }', '}').replace(', ]', ']')
-
-                        # 智能修复字符串内部的引号
-                        # 使用一个简单的状态机来识别字符串并转义其中的引号
-                        def fix_json_string(s):
-                            result = []
-                            in_string = False
-                            escape_next = False
-                            quote_char = None
-
-                            for i, char in enumerate(s):
-                                if escape_next:
-                                    # 转义字符，直接添加
-                                    result.append(char)
-                                    escape_next = False
-                                    continue
-
-                                if char == '\\':
-                                    # 转义字符
-                                    result.append(char)
-                                    escape_next = True
-                                    continue
-
-                                if not in_string:
-                                    # 不在字符串中
-                                    if char in ['"', "'"]:
-                                        # 开始字符串
-                                        in_string = True
-                                        quote_char = char
-                                        result.append(char)
-                                    else:
-                                        result.append(char)
-                                else:
-                                    # 在字符串中
-                                    if char == quote_char:
-                                        # 结束字符串
-                                        in_string = False
-                                        quote_char = None
-                                        result.append(char)
-                                    elif char in ['"', "'"]:
-                                        # 字符串内部的引号，需要转义
-                                        result.append('\\' + char)
-                                    else:
-                                        result.append(char)
-
-                            return ''.join(result)
-
-                        cleaned_response = fix_json_string(cleaned_response)
-
-                        # 修复可能的注释（虽然不应该有）
-                        cleaned_response = re.sub(r'//.*?\n', '\n', cleaned_response)
-                        cleaned_response = re.sub(r'/\*.*?\*/', '', cleaned_response, flags=re.DOTALL)
-
-                        habits_data = json.loads(cleaned_response)
-                        logger.info("Successfully parsed habits JSON after fixing common errors")
-                    except json.JSONDecodeError as e2:
-                        logger.error(f"Failed to parse habits JSON even after fixing: {e2}")
-                        return False
-                if isinstance(habits_data, dict):
-                    async with self._state_lock:
-                        self._state.speaking_habits = habits_data.get("speaking_habits", [])
-                        self._state.behavior_habits = habits_data.get("behavior_habits", [])
-                        self._state.interests = habits_data.get("interests", [])
-                        self._state.preferences = habits_data.get("preferences", {})
-                        # 保存人格哈希值 / Save personality hash
-                        self._state.personality_hash = personality_hash
-
-                    # Habits are saved to state file, not config file
-                    # 习惯已保存到状态文件，不保存到配置文件（避免丢失注释）
-                    logger.info(f"Generated habits successfully: {len(self._state.speaking_habits)} speaking habits, {len(self._state.behavior_habits)} behavior habits, {len(self._state.interests)} interests (saved to state file)")
-                    logger.info(f"Saved personality hash: {self._state.personality_hash}")
-                    return True
-                else:
-                    logger.error(f"Invalid habits data type: {type(habits_data)}")
-            except json.JSONDecodeError as e:
-                logger.error(f"Failed to parse habits JSON: {e}")
-                logger.error(f"Cleaned response (first 500 chars): {cleaned_response[:500] if cleaned_response else 'empty'}")
-                logger.error(f"Original response (first 500 chars): {response[:500] if response else 'empty'}")
-            except Exception as e:
-                logger.error(f"Unexpected error parsing habits: {e}", exc_info=True)
+        except Exception as e:
+            logger.error(f"Failed to generate habits: {e}", exc_info=True)
 
         except Exception as e:
             logger.error(f"Failed to generate habits: {e}", exc_info=True)
@@ -2479,6 +2903,11 @@ verbose = false
         """
         try:
             current_time = await self._time_api.get_current_time()
+            current_time_str = current_time.strftime("%Y-%m-%d %H:%M:%S")
+            
+            logger.debug(f"[DEBUG] _update_current_activity called at {current_time_str}")
+            logger.debug(f"[DEBUG] Current activity before update: {self._state.current_activity}")
+            logger.debug(f"[DEBUG] Schedule has {len(self._state.schedule)} activities")
             
             # 使用改进的活动匹配逻辑 / Use improved activity matching logic
             current_activity_obj = await self._get_current_schedule_activity(current_time)
@@ -2486,24 +2915,33 @@ verbose = false
             if current_activity_obj:
                 new_activity = current_activity_obj.get("activity_type", "idle")
                 new_description = current_activity_obj.get("description", "")
+                start_time = current_activity_obj.get("start_time", "")
+                end_time = current_activity_obj.get("end_time", "")
+                activity_time = f"{start_time}-{end_time}" if start_time and end_time else start_time
+                
+                logger.debug(f"[DEBUG] Found matching activity: {new_activity} at {activity_time} - {new_description}")
                 
                 async with self._state_lock:
                     # 如果活动类型发生变化，更新当前活动
                     if self._state.current_activity != new_activity:
-                        logger.info(f"Current activity changed: {self._state.current_activity} -> {new_activity}")
+                        logger.info(f"[DEBUG] Current activity changed: {self._state.current_activity} -> {new_activity} at {current_time_str}")
+                        logger.info(f"[DEBUG] Activity details: {activity_time} - {new_description}")
                         self._state.current_activity = new_activity
                         self._state.current_activity_description = new_description
                         self._state.last_activity_time = time.time()
+                    else:
+                        logger.debug(f"[DEBUG] Current activity unchanged: {new_activity}")
             else:
                 # 没有找到匹配的活动，设置为空闲
+                logger.debug(f"[DEBUG] No matching activity found for time {current_time_str}")
                 async with self._state_lock:
                     if self._state.current_activity != "idle":
-                        logger.info("No matching activity found, setting to idle")
+                        logger.info(f"[DEBUG] Setting activity to idle at {current_time_str}")
                         self._state.current_activity = "idle"
                         self._state.current_activity_description = ""
                         self._state.last_activity_time = time.time()
         except Exception as e:
-            logger.error(f"Failed to update current activity: {e}", exc_info=True)
+            logger.error(f"[DEBUG] Failed to update current activity: {e}", exc_info=True)
 
     async def _update_states(self):
         """更新状态 / Update states"""
@@ -2538,6 +2976,74 @@ verbose = false
 
         async with self._state_lock:
             self._state.last_update = current_time.timestamp()
+            self._is_dirty = True  # 标记数据已更改 / Mark data as changed
+
+    def _fill_schedule_gaps(self, schedule: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """补全日程空隙 / Fill schedule gaps
+
+        确保日程覆盖全天24小时，没有空隙。
+        Ensures schedule covers full 24 hours without gaps.
+
+        对于长时间空隙（>30分钟），插入"自由活动"或"休息"活动，而非简单延长前一个活动。
+        For long gaps (>30 minutes), insert "free time" or "rest" activities instead of simply extending previous activity.
+
+        Args:
+            schedule: 原始日程 / Original schedule
+
+        Returns:
+            补全后的日程 / Filled schedule
+        """
+        if not schedule:
+            return schedule
+
+        # 按开始时间排序 / Sort by start time
+        sorted_schedule = sorted(schedule, key=lambda x: x.get("start_time", ""))
+
+        filled_schedule = []
+
+        for i, activity in enumerate(sorted_schedule):
+            filled_schedule.append(activity)
+
+            # 如果不是最后一个活动，检查是否有空隙 / If not last activity, check for gaps
+            if i + 1 < len(sorted_schedule):
+                current_end_str = activity.get("end_time", "")
+                next_start_str = sorted_schedule[i + 1].get("start_time", "")
+
+                if ":" in current_end_str and ":" in next_start_str:
+                    try:
+                        current_end_hour, current_end_minute = map(int, current_end_str.split(":"))
+                        next_start_hour, next_start_minute = map(int, next_start_str.split(":"))
+
+                        current_end_minutes = current_end_hour * 60 + current_end_minute
+                        next_start_minutes = next_start_hour * 60 + next_start_minute
+
+                        # 如果有空隙 / If there's a gap
+                        if current_end_minutes < next_start_minutes:
+                            gap_minutes = next_start_minutes - current_end_minutes
+                            logger.info(f"Found schedule gap of {gap_minutes} minutes between {current_end_str} and {next_start_str}")
+
+                            # 对于长时间空隙（>30分钟），插入自由活动或休息活动
+                            # For long gaps (>30 minutes), insert free time or rest activities
+                            if gap_minutes > 30:
+                                # 创建自由活动 / Create free time activity
+                                free_activity = {
+                                    "start_time": current_end_str,
+                                    "end_time": next_start_str,
+                                    "activity_type": "leisure",
+                                    "description": "自由活动时间，休息放松或做自己喜欢的事情",
+                                    "priority": 2
+                                }
+                                filled_schedule.append(free_activity)
+                                logger.info(f"Inserted free time activity for {gap_minutes} minutes gap")
+                            else:
+                                # 对于短时间空隙（≤30分钟），延长前一个活动
+                                # For short gaps (≤30 minutes), extend previous activity
+                                filled_schedule[-1]["end_time"] = next_start_str
+                                logger.info(f"Extended previous activity to fill {gap_minutes} minutes gap")
+                    except (ValueError, IndexError) as e:
+                        logger.warning(f"Failed to parse time for gap filling: {e}")
+
+        return filled_schedule
 
     async def _get_current_schedule_activity(self, current_time: datetime) -> Optional[Dict[str, Any]]:
         """获取当前时间的日程活动 / Get current schedule activity for current time
@@ -2576,8 +3082,19 @@ verbose = false
                     start_time_minutes = start_hour * 60 + start_minute
                     end_time_minutes = end_hour * 60 + end_minute
 
+                    # 处理跨天情况 / Handle cross-day case
+                    is_cross_day = end_time_minutes < start_time_minutes
+                    in_time_range = False
+                    
+                    if is_cross_day:
+                        # 跨天:当前时间 >= 开始时间 或 当前时间 < 结束时间
+                        in_time_range = (current_time_minutes >= start_time_minutes) or (current_time_minutes < end_time_minutes)
+                    else:
+                        # 不跨天:正常比较
+                        in_time_range = start_time_minutes <= current_time_minutes < end_time_minutes
+
                     # 判断当前时间是否在时间段内 / Check if current time is within time slot
-                    if start_time_minutes <= current_time_minutes < end_time_minutes:
+                    if in_time_range:
                         current_activity = activity
                         break
                 except (ValueError, IndexError):
@@ -2589,22 +3106,39 @@ verbose = false
         """更新睡眠状态 / Update sleep state"""
         sleep_enabled = self.get_config("sleep.enabled", True)
         if not sleep_enabled:
+            logger.debug("[SLEEP] Sleep system is disabled")
             return
 
         try:
+            logger.info("[SLEEP] Starting sleep state update...")
             async with self._state_lock:
                 current_time = await self._time_api.get_current_time()
+                current_time_str = current_time.strftime("%Y-%m-%d %H:%M:%S")
                 current_hour = current_time.hour
                 current_minute = current_time.minute
                 current_time_minutes = current_hour * 60 + current_minute
 
+                logger.debug(f"[SLEEP] Current time: {current_time_str} ({current_time_minutes} minutes)")
+
                 # 检查当前日程活动 / Check current schedule activity
                 current_activity = self._state.current_activity
+                logger.debug(f"[SLEEP] Current activity: {current_activity}")
+
+                # 记录当前睡眠状态 / Log current sleep state
+                old_sleep_state = self._state.sleep_state.value
+                logger.debug(f"[SLEEP] Current sleep state: {old_sleep_state}")
                 schedule = self._state.schedule
+
+                logger.debug(f"[DEBUG] _update_sleep_state called at {current_time_str}")
+                logger.debug(f"[DEBUG] Current sleep state: {self._state.sleep_state.value}")
+                logger.debug(f"[DEBUG] Current fatigue: {self._state.fatigue}")
+                logger.debug(f"[DEBUG] Current health: {self._state.health}")
+                logger.debug(f"[DEBUG] Current activity: {current_activity}")
 
                 # 使用改进的活动匹配逻辑 / Use improved activity matching logic
                 schedule_activity_obj = await self._get_current_schedule_activity(current_time)
                 schedule_activity = schedule_activity_obj.get("activity_type", "") if schedule_activity_obj else ""
+                logger.debug(f"[DEBUG] Schedule activity: {schedule_activity}")
 
                 # 日程联动：如果当前日程为睡眠活动，进入睡眠状态 / Schedule integration: sleep if current activity is sleep
                 if schedule_activity == "sleep":
@@ -2802,6 +3336,7 @@ verbose = false
             logger.debug(f"Saving state with personality_hash: {state_data.get('personality_hash', 'N/A')}")
             with open(self._state_file, 'w', encoding='utf-8') as f:
                 json.dump(state_data, f, indent=2, ensure_ascii=False)
+            self._is_dirty = False  # 清除脏数据标志 / Clear dirty flag
             logger.debug("State saved successfully")
         except Exception as e:
             logger.error(f"Failed to save state: {e}", exc_info=True)
@@ -2886,19 +3421,109 @@ class MessageEventHandler(BaseEventHandler):
         if not _plugin_instance or not message:
             return True, True, None, None, None
 
-        # Slight increase in fatigue and hunger on message with probability
+        # 智能更新当前活动，避免频繁查询
+        # Intelligently update current activity, avoiding frequent queries
+        try:
+            current_time = await _plugin_instance._time_api.get_current_time()
+            current_time_minutes = current_time.hour * 60 + current_time.minute
+            
+            # 检查是否需要更新活动（缓存机制）
+            # Check if activity update is needed (caching mechanism)
+            should_update = False
+            
+            async with _plugin_instance._state_lock:
+                # 如果从未更新过活动，或者距离上次更新超过5分钟，或者当前活动是idle
+                # If activity never updated, or more than 5 minutes since last update, or current activity is idle
+                if _plugin_instance._state.last_activity_time == 0:
+                    should_update = True
+                elif time.time() - _plugin_instance._state.last_activity_time > 300:  # 5分钟
+                    should_update = True
+                elif _plugin_instance._state.current_activity == "idle":
+                    should_update = True
+                else:
+                    # 检查是否跨过了活动边界（简化判断：如果分钟数是0、15、30、45）
+                    # Check if crossed activity boundary (simplified: if minute is 0, 15, 30, 45)
+                    if current_time_minutes % 15 == 0:
+                        should_update = True
+            
+            if should_update:
+                current_activity_obj = await _plugin_instance._get_current_schedule_activity(current_time)
+                
+                if current_activity_obj:
+                    new_activity = current_activity_obj.get("activity_type", "idle")
+                    new_description = current_activity_obj.get("description", "")
+                    
+                    async with _plugin_instance._state_lock:
+                        if _plugin_instance._state.current_activity != new_activity:
+                            logger.info(f"[DEBUG] Activity updated: {_plugin_instance._state.current_activity} -> {new_activity} (time: {current_time.strftime('%H:%M')})")
+                            _plugin_instance._state.current_activity = new_activity
+                            _plugin_instance._state.current_activity_description = new_description
+                            _plugin_instance._state.last_activity_time = time.time()
+        except Exception as e:
+            logger.error(f"[DEBUG] Failed to update activity: {e}")
+
+        # 智能更新疲劳度和饥饿度 / Intelligently update fatigue and hunger
         # 消息时按概率略微增加疲劳度和饥饿度
         import random
         
-        update_probability = _plugin_instance.get_config("state.message_state_update_probability", 0.7)
+        update_probability = _plugin_instance.get_config("state.message_state_update_probability", 0.5)  # 降低概率到50%
         if random.random() < update_probability:
-            # 每次消息增加2-5点疲劳和饥饿值 / Increase 2-5 points of fatigue and hunger per message
-            fatigue_increase = random.randint(2, 5)
-            hunger_increase = random.randint(2, 5)
+            # 获取当前活动类型 / Get current activity type
+            current_activity = _plugin_instance._state.current_activity.lower()
+            
+            # 根据活动类型设置增长量 / Set increase amount based on activity type
+            # 疲劳度影响 / Fatigue impact
+            if current_activity == "sleep":
+                fatigue_increase = -2  # 睡觉恢复体力
+            elif current_activity == "rest":
+                fatigue_increase = 0  # 休息不增加疲劳
+            elif current_activity == "meal":
+                fatigue_increase = 0  # 吃饭不增加疲劳
+            elif current_activity == "exercise":
+                fatigue_increase = random.randint(2, 4)  # 运动大量增加疲劳
+            elif current_activity in ["work", "study", "medical"]:
+                fatigue_increase = random.randint(1, 2)  # 工作、学习、医疗中等增加疲劳
+            else:  # leisure, other
+                fatigue_increase = random.randint(0, 1)  # 娱乐、其他少量增加疲劳
+            
+            # 饥饿度影响 / Hunger impact
+            if current_activity == "meal":
+                hunger_increase = -3  # 吃饭减少饥饿
+            elif current_activity == "sleep":
+                hunger_increase = random.randint(0, 1)  # 睡觉少量增加饥饿
+            elif current_activity == "rest":
+                hunger_increase = random.randint(0, 1)  # 休息少量增加饥饿
+            elif current_activity == "exercise":
+                hunger_increase = random.randint(0, 1)  # 运动少量增加饥饿
+            elif current_activity in ["work", "study", "medical"]:
+                hunger_increase = random.randint(1, 2)  # 工作、学习、医疗中等增加饥饿
+            else:  # leisure, other
+                hunger_increase = random.randint(0, 1)  # 娱乐、其他少量增加饥饿
+            
+            # 根据当前状态调整增长量 / Adjust increase based on current state
+            # 如果疲劳度已经很高，减少增长量 / If fatigue is already high, reduce increase
+            if _plugin_instance._state.fatigue > 80 and fatigue_increase > 0:
+                fatigue_increase = max(0, fatigue_increase - 1)
+            elif _plugin_instance._state.fatigue > 90 and fatigue_increase > 0:
+                fatigue_increase = 0
+            
+            # 如果饥饿度已经很高，减少增长量 / If hunger is already high, reduce increase
+            if _plugin_instance._state.hunger > 80 and hunger_increase > 0:
+                hunger_increase = max(0, hunger_increase - 1)
+            elif _plugin_instance._state.hunger > 90 and hunger_increase > 0:
+                hunger_increase = 0
+            
+            # 应用变化 / Apply changes
             async with _plugin_instance._state_lock:
-                _plugin_instance._state.fatigue = min(100, _plugin_instance._state.fatigue + fatigue_increase)
-                _plugin_instance._state.hunger = min(100, _plugin_instance._state.hunger + hunger_increase)
-                logger.debug(f"[STATE] Message received: fatigue +{fatigue_increase} -> {_plugin_instance._state.fatigue}, hunger +{hunger_increase} -> {_plugin_instance._state.hunger}")
+                old_fatigue = _plugin_instance._state.fatigue
+                old_hunger = _plugin_instance._state.hunger
+                
+                _plugin_instance._state.fatigue = max(0, min(100, _plugin_instance._state.fatigue + fatigue_increase))
+                _plugin_instance._state.hunger = max(0, min(100, _plugin_instance._state.hunger + hunger_increase))
+                
+                # 只有当有实际变化时才记录日志 / Only log if there's actual change
+                if _plugin_instance._state.fatigue != old_fatigue or _plugin_instance._state.hunger != old_hunger:
+                    logger.debug(f"[STATE] Message received (activity: {current_activity}): fatigue {old_fatigue} -> {_plugin_instance._state.fatigue} ({fatigue_increase:+d}), hunger {old_hunger} -> {_plugin_instance._state.hunger} ({hunger_increase:+d})")
 
         # Check if current activity requires hands-on work (reduces reply probability)
         # 检查当前活动是否需要动手操作（降低回复概率）
@@ -2921,6 +3546,48 @@ class MessageEventHandler(BaseEventHandler):
                     message.additional_data = {}
                 message.additional_data["reply_reduction_factor"] = actual_reduction
                 message.additional_data["reply_reduction_reason"] = f"当前活动'{current_activity_type}'需要动手操作"
+
+        # 检测用户是否在询问当前活动
+        # Detect if user is asking about current activity
+        if message and hasattr(message, 'plain_text') and message.plain_text:
+            text = message.plain_text.lower()
+            # 检测关键词：你在干嘛、在做什么、现在在忙什么、在忙吗、在干什么等
+            # Detect keywords: 你在干嘛、在做什么、现在在忙什么、在忙吗、在干什么等
+            activity_keywords = ["你在干嘛", "在做什么", "现在在忙什么", "在忙吗", "在干什么", "在忙不", "忙什么", "在干什么呢", "在干嘛呢", "现在在做什么", "正在做什么"]
+            
+            if any(keyword in text for keyword in activity_keywords):
+                logger.info("[DEBUG] Detected user asking about current activity, using tool to get info")
+                
+                # 通过工具获取当前活动信息
+                # Use tool to get current activity information
+                try:
+                    # 创建 GetScheduleTool 实例
+                    # Create GetScheduleTool instance
+                    schedule_tool = GetScheduleTool()
+                    tool_result = await schedule_tool.execute({})
+                    
+                    # 检查工具返回值是否有效
+                    if tool_result and isinstance(tool_result, dict) and tool_result.get("name") == "get_life_simulation_schedule":
+                        tool_content = tool_result.get("content", "")
+                        current_activity = tool_result.get("current_activity", "idle")
+                        current_activity_description = tool_result.get("current_activity_description", "")
+                        
+                        # 构建当前活动信息
+                        activity_info = f"🏃 当前活动: {current_activity_description if current_activity_description else current_activity}"
+                        
+                        logger.info(f"[DEBUG] Got activity info from tool: {activity_info}")
+                        
+                        # 将工具返回的内容添加到消息末尾
+                        # Add tool result to message end
+                        if message.plain_text:
+                            # 注意：plain_text 可能是只读的，不能直接修改
+                            # 这里我们记录日志，但不修改消息内容
+                            # 实际的处理应该通过其他方式实现，比如返回额外的信息
+                            logger.info(f"[DEBUG] Activity info: {activity_info}")
+                    else:
+                        logger.warning(f"[DEBUG] Tool returned invalid result: {tool_result}")
+                except Exception as e:
+                    logger.error(f"[DEBUG] Error calling GetScheduleTool: {e}", exc_info=True)
 
         return True, True, None, None, None
 
@@ -2977,7 +3644,7 @@ class SocialNetworkEventHandler(BaseEventHandler):
                 return True, True, None, None, None
 
             # 添加或更新用户 / Add or update user
-            _plugin_instance._social_network.add_or_update_user(user_id, user_name)
+            await _plugin_instance._social_network.add_or_update_user(user_id, user_name)
 
             # 记录互动 / Record interaction
             await _plugin_instance._social_network.record_interaction(
@@ -3013,8 +3680,8 @@ class MessageSleepEventHandler(BaseEventHandler):
         is_dream_message = False
         if hasattr(message, 'message_base_info'):
             # 检查发送者ID是否为机器人自己（Dream系统通常以机器人身份发送）
-            sender_id = str(message.message_base_info.get("user_id", ""))
-            bot_id = str(global_config.bot.qq_account) if hasattr(global_config, 'bot') else ""
+            sender_id = message.message_base_info.get("user_id", "")
+            bot_id = message.message_base_info.get("self_id", "")
             if sender_id == bot_id:
                 # 是机器人自己发送的消息，可能是Dream系统
                 is_dream_message = True
@@ -3027,47 +3694,73 @@ class MessageSleepEventHandler(BaseEventHandler):
         # 检查当前睡眠状态 / Check current sleep state
         sleep_state = _plugin_instance._state.sleep_state
 
-        # 如果清醒或困倦，检查日程是否需要进入睡眠 / If awake or sleepy, check if schedule requires sleep
-        if sleep_state in [SleepState.AWAKE, SleepState.SLEEPY]:
-            # 检查当前日程活动是否为睡眠 / Check if current schedule activity is sleep
-            current_time = await _plugin_instance._time_api.get_current_time()
-            schedule = _plugin_instance._state.schedule
+        # 获取当前时间和日程 / Get current time and schedule
+        current_time = await _plugin_instance._time_api.get_current_time()
+        schedule = _plugin_instance._state.schedule
+        
+        # 查找当前日程活动 / Find current schedule activity
+        current_activity_is_sleep = False
+        if schedule:
+            current_hour = current_time.hour
+            current_minute = current_time.minute
+            current_time_minutes = current_hour * 60 + current_minute
             
-            if schedule:
-                current_hour = current_time.hour
-                current_minute = current_time.minute
-                current_time_minutes = current_hour * 60 + current_minute
-                
-                # 查找当前时间的日程活动 / Find schedule activity for current time
-                for activity in schedule:
-                    start_time_str = activity.get("start_time", "")
-                    end_time_str = activity.get("end_time", "")
-                    if ":" in start_time_str and ":" in end_time_str:
-                        try:
-                            start_hour, start_minute = map(int, start_time_str.split(":"))
-                            end_hour, end_minute = map(int, end_time_str.split(":"))
-                            start_time_minutes = start_hour * 60 + start_minute
-                            end_time_minutes = end_hour * 60 + end_minute
-                            
-                            # 如果当前时间在睡眠活动的时间段内 / If current time is within sleep activity time slot
-                            if start_time_minutes <= current_time_minutes < end_time_minutes:
-                                activity_type = activity.get("activity_type", "")
-                                if activity_type == "sleep":
-                                    # 日程是睡眠活动，_update_sleep_state 会处理进入睡眠 / Schedule is sleep activity, _update_sleep_state will handle entering sleep
-                                    logger.info(f"[SCHEDULE] Current activity is sleep, _update_sleep_state will handle sleep state")
-                                    break
-                        except (ValueError, IndexError) as e:
-                            logger.warning(f"[SCHEDULE] Failed to parse activity time {start_time_str}-{end_time_str}: {e}")
-            
-            # 如果已经是睡眠状态，拦截消息 / If already sleeping, intercept message
-            sleep_state = _plugin_instance._state.sleep_state
+            # 查找当前时间的日程活动 / Find schedule activity for current time
+            for activity in schedule:
+                start_time_str = activity.get("start_time", "")
+                end_time_str = activity.get("end_time", "")
+                if ":" in start_time_str and ":" in end_time_str:
+                    try:
+                        start_hour, start_minute = map(int, start_time_str.split(":"))
+                        end_hour, end_minute = map(int, end_time_str.split(":"))
+                        start_time_minutes = start_hour * 60 + start_minute
+                        end_time_minutes = end_hour * 60 + end_minute
+                        
+                        # 处理跨天情况 / Handle cross-day case (e.g., 23:00-07:00)
+                        is_cross_day = end_time_minutes < start_time_minutes
+                        in_time_range = False
+                        
+                        if is_cross_day:
+                            # 跨天:当前时间 >= 开始时间 或 当前时间 < 结束时间
+                            in_time_range = (current_time_minutes >= start_time_minutes) or (current_time_minutes < end_time_minutes)
+                        else:
+                            # 不跨天:正常比较
+                            in_time_range = start_time_minutes <= current_time_minutes < end_time_minutes
+                        
+                        # 如果当前时间在活动时间段内 / If current time is within activity time slot
+                        if in_time_range:
+                            activity_type = activity.get("activity_type", "")
+                            if activity_type == "sleep":
+                                current_activity_is_sleep = True
+                            break
+                    except (ValueError, IndexError) as e:
+                        logger.warning(f"[SCHEDULE] Failed to parse activity time {start_time_str}-{end_time_str}: {e}")
+        
+        # 根据日程同步睡眠状态 / Sync sleep state with schedule
+        if current_activity_is_sleep:
+            # 日程是睡眠活动，如果是清醒状态应该进入睡眠 / Schedule is sleep, should enter sleep if awake
+            if sleep_state in [SleepState.AWAKE, SleepState.SLEEPY]:
+                logger.info(f"[SCHEDULE] Current activity is sleep, entering sleep state")
+                async with _plugin_instance._state_lock:
+                    _plugin_instance._state.sleep_state = SleepState.FALLING_ASLEEP
+                    _plugin_instance._state.last_sleep_time = current_time.timestamp()
+                    logger.info(f"[SLEEP] State changed: {sleep_state.value} -> FALLING_ASLEEP")
+                sleep_state = SleepState.FALLING_ASLEEP
+        else:
+            # 日程不是睡眠活动，如果是睡眠状态应该唤醒 / Schedule is not sleep, should wake up if sleeping
             if sleep_state not in [SleepState.AWAKE, SleepState.SLEEPY]:
-                return self._handle_sleep_message(message, sleep_state)
-            
-            return True, True, None, None, None
-
-        # 如果在睡眠状态（falling_asleep, light_sleep, deep_sleep, waking_up），拦截消息 / If sleeping, intercept message
-        return self._handle_sleep_message(message, sleep_state)
+                logger.info(f"[SCHEDULE] Current activity is not sleep, waking up from {sleep_state.value}")
+                async with _plugin_instance._state_lock:
+                    _plugin_instance._state.sleep_state = SleepState.AWAKE
+                    _plugin_instance._state.last_wake_time = current_time.timestamp()
+                    logger.info(f"[SLEEP] State changed: {sleep_state.value} -> AWAKE (schedule sync)")
+                sleep_state = SleepState.AWAKE
+        
+        # 如果在睡眠状态，拦截消息 / If sleeping, intercept message
+        if sleep_state not in [SleepState.AWAKE, SleepState.SLEEPY]:
+            return self._handle_sleep_message(message, sleep_state)
+        
+        return True, True, None, None, None
     
     def _handle_sleep_message(self, message: MaiMessages | None, sleep_state: SleepState) -> Tuple[bool, bool, Optional[str], None, None]:
         """处理睡眠期间的消息 / Handle message during sleep"""
@@ -3374,11 +4067,347 @@ class SocialNetworkCommand(BaseCommand):
             return False, None, 0
 
 
+# ============================================================
+# Debug Commands / 调试命令
+# ============================================================
+
+class DebugSleepCommand(BaseCommand):
+    """调试命令：立即入睡 / Debug Command: Force Sleep"""
+
+    command_name = "debug_sleep"
+    command_description = "立即进入睡眠状态 / Force sleep immediately"
+    command_pattern = r"^/debug_sleep$"
+
+    async def execute(self) -> Tuple[bool, Optional[str], int]:
+        if not _plugin_instance:
+            await self.send_text("插件未就绪", storage_message=False)
+            return False, None, 0
+
+        try:
+            logger.info("[DEBUG] DebugSleepCommand: forcing sleep state")
+            
+            async with _plugin_instance._state_lock:
+                _plugin_instance._state.sleep_state = SleepState.FALLING_ASLEEP
+                _plugin_instance._state.last_sleep_time = time.time()
+                
+                # 设置高疲劳度以确保能够进入睡眠
+                _plugin_instance._state.fatigue = 90
+                
+                logger.info(f"[DEBUG] Forced sleep state: {_plugin_instance._state.sleep_state.value}")
+                logger.info(f"[DEBUG] Set fatigue to: {_plugin_instance._state.fatigue}")
+            
+            await self.send_text("💤 已强制进入睡眠状态", storage_message=False)
+            return True, None, 1
+        except Exception as e:
+            logger.error(f"DebugSleepCommand failed: {e}", exc_info=True)
+            await self.send_text(f"操作失败: {str(e)}", storage_message=False)
+            return False, None, 0
+
+
+class DebugWakeCommand(BaseCommand):
+    """调试命令：强制唤醒 / Debug Command: Force Wake"""
+
+    command_name = "debug_wake"
+    command_description = "强制从睡眠中醒来 / Force wake from sleep"
+    command_pattern = r"^/debug_wake$"
+
+    async def execute(self) -> Tuple[bool, Optional[str], int]:
+        if not _plugin_instance:
+            await self.send_text("插件未就绪", storage_message=False)
+            return False, None, 0
+
+        try:
+            logger.info("[DEBUG] DebugWakeCommand: forcing wake state")
+            
+            async with _plugin_instance._state_lock:
+                old_state = _plugin_instance._state.sleep_state.value
+                _plugin_instance._state.sleep_state = SleepState.WAKING_UP
+                _plugin_instance._state.last_wake_time = time.time()
+                
+                # 降低疲劳度
+                _plugin_instance._state.fatigue = 10
+                
+                logger.info(f"[DEBUG] Forced wake state: {old_state} -> {_plugin_instance._state.sleep_state.value}")
+                logger.info(f"[DEBUG] Set fatigue to: {_plugin_instance._state.fatigue}")
+            
+            await self.send_text("☀️ 已强制唤醒", storage_message=False)
+            return True, None, 1
+        except Exception as e:
+            logger.error(f"DebugWakeCommand failed: {e}", exc_info=True)
+            await self.send_text(f"操作失败: {str(e)}", storage_message=False)
+            return False, None, 0
+
+
+class DebugSetFatigueCommand(BaseCommand):
+    """调试命令：设置疲劳度 / Debug Command: Set Fatigue"""
+
+    command_name = "debug_set_fatigue"
+    command_description = "设置疲劳度（0-100）/ Set fatigue level (0-100)"
+    command_pattern = r"^/debug_set_fatigue\s+(\d+)$"
+
+    async def execute(self) -> Tuple[bool, Optional[str], int]:
+        if not _plugin_instance:
+            await self.send_text("插件未就绪", storage_message=False)
+            return False, None, 0
+
+        try:
+            # 从正则匹配组中获取参数
+            fatigue_value = 50
+            if self.matched_groups:
+                # 尝试从匹配组中获取值
+                for key, value in self.matched_groups.items():
+                    if value.isdigit():
+                        fatigue_value = int(value)
+                        break
+            
+            # 限制范围
+            fatigue_value = max(0, min(100, fatigue_value))
+            
+            logger.info(f"[DEBUG] DebugSetFatigueCommand: setting fatigue to {fatigue_value}")
+            
+            async with _plugin_instance._state_lock:
+                old_fatigue = _plugin_instance._state.fatigue
+                _plugin_instance._state.fatigue = fatigue_value
+                
+                logger.info(f"[DEBUG] Fatigue changed: {old_fatigue} -> {fatigue_value}")
+            
+            await self.send_text(f"😫 疲劳度已设置为 {fatigue_value}/100", storage_message=False)
+            return True, None, 1
+        except Exception as e:
+            logger.error(f"DebugSetFatigueCommand failed: {e}", exc_info=True)
+            await self.send_text(f"操作失败: {str(e)}", storage_message=False)
+            return False, None, 0
+
+
+class DebugSetHungerCommand(BaseCommand):
+    """调试命令：设置饥饿度 / Debug Command: Set Hunger"""
+
+    command_name = "debug_set_hunger"
+    command_description = "设置饥饿度（0-100）/ Set hunger level (0-100)"
+    command_pattern = r"^/debug_set_hunger\s+(?P<value>\d+)$"
+
+    async def execute(self) -> Tuple[bool, Optional[str], int]:
+        if not _plugin_instance:
+            await self.send_text("插件未就绪", storage_message=False)
+            return False, None, 0
+
+        try:
+            # 从正则匹配组中获取参数
+            hunger_value = 50
+            if self.matched_groups and "value" in self.matched_groups:
+                hunger_value = int(self.matched_groups["value"])
+            
+            # 限制范围
+            hunger_value = max(0, min(100, hunger_value))
+            
+            logger.info(f"[DEBUG] DebugSetHungerCommand: setting hunger to {hunger_value}")
+            
+            async with _plugin_instance._state_lock:
+                old_hunger = _plugin_instance._state.hunger
+                _plugin_instance._state.hunger = hunger_value
+                
+                logger.info(f"[DEBUG] Hunger changed: {old_hunger} -> {hunger_value}")
+            
+            await self.send_text(f"🍔 饥饿度已设置为 {hunger_value}/100", storage_message=False)
+            return True, None, 1
+        except Exception as e:
+            logger.error(f"DebugSetHungerCommand failed: {e}", exc_info=True)
+            await self.send_text(f"操作失败: {str(e)}", storage_message=False)
+            return False, None, 0
+
+
+class DebugSetHealthCommand(BaseCommand):
+    """调试命令：设置健康度 / Debug Command: Set Health"""
+
+    command_name = "debug_set_health"
+    command_description = "设置健康度（0-100）/ Set health level (0-100)"
+    command_pattern = r"^/debug_set_health\s+(?P<value>\d+)$"
+
+    async def execute(self) -> Tuple[bool, Optional[str], int]:
+        if not _plugin_instance:
+            await self.send_text("插件未就绪", storage_message=False)
+            return False, None, 0
+
+        try:
+            # 从正则匹配组中获取参数
+            health_value = 100
+            logger.debug(f"[DEBUG] matched_groups: {self.matched_groups}")
+            logger.debug(f"[DEBUG] matched_groups type: {type(self.matched_groups)}")
+            if self.matched_groups:
+                logger.debug(f"[DEBUG] matched_groups keys: {list(self.matched_groups.keys())}")
+            if self.matched_groups and len(self.matched_groups) > 0:
+                # 尝试获取第一个值（如果正则没有命名组，groupdict会返回空字典）
+                group_values = list(self.matched_groups.values())
+                if group_values:
+                    health_value = int(group_values[0])
+                    logger.debug(f"[DEBUG] Found value in matched_groups: {health_value}")
+            
+            # 限制范围
+            health_value = max(0, min(100, health_value))
+            
+            logger.info(f"[DEBUG] DebugSetHealthCommand: setting health to {health_value}")
+            
+            async with _plugin_instance._state_lock:
+                old_health = _plugin_instance._state.health
+                old_health_status = _plugin_instance._state.health_status
+                _plugin_instance._state.health = health_value
+                
+                # 更新健康状态
+                if health_value >= 80:
+                    _plugin_instance._state.health_status = HealthStatus.HEALTHY
+                elif health_value >= 60:
+                    _plugin_instance._state.health_status = HealthStatus.RECOVERING
+                elif health_value >= 40:
+                    _plugin_instance._state.health_status = HealthStatus.SLIGHTLY_ILL
+                elif health_value >= 20:
+                    _plugin_instance._state.health_status = HealthStatus.ILL
+                else:
+                    _plugin_instance._state.health_status = HealthStatus.SERIOUSLY_ILL
+                
+                logger.info(f"[DEBUG] Health changed: {old_health} -> {health_value}")
+                logger.info(f"[DEBUG] Health status: {old_health_status.value} -> {_plugin_instance._state.health_status.value}")
+            
+            # 如果健康状态变化，诊断疾病并重新生成日程 / Diagnose illness and regenerate schedule if health status changed
+            if old_health_status != _plugin_instance._state.health_status:
+                logger.info("[DEBUG] Health status changed, diagnosing illness...")
+                await _plugin_instance._diagnose_illness()
+                
+                # 重新生成日程 / Regenerate schedule
+                logger.info("[DEBUG] Regenerating schedule due to health status change...")
+                await _plugin_instance._generate_schedule()
+            
+            await self.send_text(f"❤️ 健康度已设置为 {health_value}/100 ({_plugin_instance._state.health_status.value})", storage_message=False)
+            return True, None, 1
+        except Exception as e:
+            logger.error(f"DebugSetHealthCommand failed: {e}", exc_info=True)
+            await self.send_text(f"操作失败: {str(e)}", storage_message=False)
+            return False, None, 0
+
+
+class DebugRegenerateScheduleCommand(BaseCommand):
+    """调试命令：强制生成日程 / Debug Command: Force Regenerate Schedule"""
+
+    command_name = "debug_regenerate_schedule"
+    command_description = "强制重新生成日程 / Force regenerate schedule"
+    command_pattern = r"^/debug_regenerate_schedule$"
+
+    async def execute(self) -> Tuple[bool, Optional[str], int]:
+        if not _plugin_instance:
+            await self.send_text("插件未就绪", storage_message=False)
+            return False, None, 0
+
+        try:
+            logger.info("[DEBUG] DebugRegenerateScheduleCommand: forcing schedule regeneration")
+            
+            await _plugin_instance._generate_schedule()
+            
+            await self.send_text("📅 已强制重新生成日程", storage_message=False)
+            return True, None, 1
+        except Exception as e:
+            logger.error(f"DebugRegenerateScheduleCommand failed: {e}", exc_info=True)
+            await self.send_text(f"操作失败: {str(e)}", storage_message=False)
+            return False, None, 0
+
+
+class DebugTriggerEventCommand(BaseCommand):
+    """调试命令：强制触发随机事件 / Debug Command: Force Trigger Random Event"""
+
+    command_name = "debug_trigger_event"
+    command_description = "强制触发随机事件 / Force trigger random event"
+    command_pattern = r"^/debug_trigger_event$"
+
+    async def execute(self) -> Tuple[bool, Optional[str], int]:
+        if not _plugin_instance:
+            await self.send_text("插件未就绪", storage_message=False)
+            return False, None, 0
+
+        try:
+            logger.info("[DEBUG] DebugTriggerEventCommand: forcing random event trigger")
+            
+            # 强制触发事件，忽略概率检查
+            event = await _plugin_instance._generate_random_event(check_probability=False)
+            if event:
+                await _plugin_instance._handle_event(event)
+                
+                event_name = event.get("event_name", "未知事件")
+                event_desc = event.get("event_description", "")
+                
+                await self.send_text(f"🎲 已触发随机事件：{event_name}\n{event_desc}", storage_message=False)
+            else:
+                await self.send_text("⚠️ 事件生成失败", storage_message=False)
+            
+            return True, None, 1
+        except Exception as e:
+            logger.error(f"DebugTriggerEventCommand failed: {e}", exc_info=True)
+            await self.send_text(f"操作失败: {str(e)}", storage_message=False)
+            return False, None, 0
+
+
+class DebugStatusCommand(BaseCommand):
+    """调试命令：详细状态查询 / Debug Command: Detailed Status"""
+
+    command_name = "debug_status"
+    command_description = "查询详细调试状态 / Query detailed debug status"
+    command_pattern = r"^/debug_status$"
+
+    async def execute(self) -> Tuple[bool, Optional[str], int]:
+        if not _plugin_instance:
+            await self.send_text("插件未就绪", storage_message=False)
+            return False, None, 0
+
+        try:
+            state = await _plugin_instance.get_state()
+            
+            # 构建详细状态消息
+            status_msg = f"""🔍 调试状态详情：
+
+【睡眠系统】
+😴 睡眠状态: {state['sleep_state']}
+💤 上次睡眠时间: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(state['last_sleep_time'])) if state['last_sleep_time'] > 0 else '未记录'}
+☀️ 上次醒来时间: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(state['last_wake_time'])) if state['last_wake_time'] > 0 else '未记录'}
+
+【生理状态】
+😫 疲劳度: {state['fatigue']}/100
+🍔 饥饿度: {state['hunger']}/100
+❤️ 健康度: {state['health']}/100 ({state['health_status']})
+
+【情绪状态】
+😊 情绪: {state['current_emotion']}
+📊 情绪强度: {state['emotion_intensity']}/100
+📝 情绪原因: {state['emotion_reason']}
+
+【活动状态】
+🏃 当前活动: {state['current_activity_description'] if state['current_activity_description'] else state['current_activity']}
+⏰ 上次活动时间: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(state['last_activity_time'])) if state['last_activity_time'] > 0 else '未记录'}
+
+【日程信息】
+📅 日程生成日期: {state['schedule_generated_date']}
+📋 日程活动数: {len(state['schedule'])}
+
+【节日信息】
+🎉 当前节日: {state['current_holiday'] if state['current_holiday'] else '无'}
+📅 是否节假日: {'是' if state['is_holiday'] else '否'}
+
+【社交网络】
+👥 用户数: {len(state.get('social_network', {}))}
+🔗 社交网络启用: {'是' if state.get('social_network_enabled', True) else '否'}
+
+【系统信息】
+⏰ 最后更新: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(state['last_update'])) if state['last_update'] > 0 else '未记录'}"""
+
+            await self.send_text(status_msg, storage_message=False)
+            return True, None, 1
+        except Exception as e:
+            logger.error(f"DebugStatusCommand failed: {e}", exc_info=True)
+            await self.send_text(f"操作失败: {str(e)}", storage_message=False)
+            return False, None, 0
+
+
 class GetStatusTool(BaseTool):
     """获取状态工具 / Get Status Tool"""
 
     name = "get_life_simulation_status"
-    description = "查询机器人的当前状态，包括生理状态（睡眠、疲劳、饥饿、健康、情绪）、当前活动、节日信息等。在以下情况下使用此工具：1)用户询问机器人的状态；2)需要根据状态调整回复内容（比如疲劳时简短回复）；3)需要根据情绪调整语气；4)需要知道当前是否在睡觉。此工具返回详细的状态信息，帮助更好地理解机器人的当前状况。"
+    description = "【重要工具】查询机器人的当前状态，包括生理状态（睡眠、疲劳、饥饿、健康、情绪）、当前活动、节日信息等。**必须使用的情况**：1)用户询问「你在干嘛」、「在做什么」、「现在在忙什么」等类似问题时，必须调用此工具获取当前活动信息；2)用户询问机器人的状态；3)需要根据状态调整回复内容（比如疲劳时简短回复）；4)需要根据情绪调整语气；5)需要知道当前是否在睡觉。**特别注意**：当用户询问你在做什么时，此工具会返回当前活动信息，你应该根据这个信息来回答用户，比如如果当前活动是「做饭」，你应该回答「我在做饭」。此工具返回详细的状态信息，帮助更好地理解机器人的当前状况。"
     parameters = []
     available_for_llm = True
 
@@ -3433,17 +4462,17 @@ class GetStatusTool(BaseTool):
 
             # 疾病信息 / Illness information
             illness_name = state.get("illness_name", "")
+            illness_reason = state.get("illness_reason", "")
+            illness_symptoms = state.get("illness_symptoms", "")
+            illness_treatment = state.get("illness_treatment", "")
             if illness_name:
-                status_lines.append(f"🏥 疾病: {illness_name}")
-                illness_reason = state.get("illness_reason", "")
+                status_lines.append(f"🤒 疾病: {illness_name}")
                 if illness_reason:
-                    status_lines.append(f"📝 原因: {illness_reason}")
-                illness_symptoms = state.get("illness_symptoms", "")
+                    status_lines.append(f"   原因: {illness_reason}")
                 if illness_symptoms:
-                    status_lines.append(f"😷 症状: {illness_symptoms}")
-                illness_treatment = state.get("illness_treatment", "")
+                    status_lines.append(f"   症状: {illness_symptoms}")
                 if illness_treatment:
-                    status_lines.append(f"💊 治疗: {illness_treatment}")
+                    status_lines.append(f"   治疗: {illness_treatment}")
 
             # 情绪状态 / Emotion state
             emotion = state.get("current_emotion", "calm")
@@ -3609,7 +4638,7 @@ class GetSocialNetworkTool(BaseTool):
     """获取社交网络工具 / Get Social Network Tool"""
 
     name = "get_social_network_info"
-    description = "查询社交网络信息，包括用户关系、亲密度和互动历史。在以下情况下使用此工具：1)用户询问与某人的关系程度；2)需要了解与特定用户的互动历史；3)需要根据关系程度调整互动方式；4)需要提供个性化回复时。如果提供user_id参数，返回该用户的详细关系信息；如果不提供，返回所有用户的摘要。"
+    description = "【查询工具】查询社交网络信息，包括用户关系、亲密度和互动历史。在以下情况下使用此工具：1)用户询问与某人的关系程度；2)需要了解与特定用户的互动历史；3)需要根据关系程度调整互动方式；4)需要提供个性化回复时；5)在设置用户关系之前，先查询当前关系状态。如果提供user_id参数，返回该用户的详细关系信息；如果不提供，返回所有用户的摘要。注意：此工具用于查询，如需修改关系，请使用set_user_relationship工具。"
     parameters = [
         ("user_id", ToolParamType.STRING, "用户ID（可选），如果提供则查询该用户的详细关系信息，如果不提供则返回所有用户的摘要", False, None)
     ]
@@ -3629,9 +4658,20 @@ class GetSocialNetworkTool(BaseTool):
 
             if user_id:
                 # 查询特定用户 / Query specific user
-                relationship = _plugin_instance._social_network.get_relationship(user_id)
+                relationship = await _plugin_instance._social_network.get_relationship(user_id)
+                
+                # 如果按 user_id 未找到,尝试按 user_name 查找 / If not found by user_id, try to find by user_name
+                if not relationship:
+                    all_relationships = await _plugin_instance._social_network.get_all_relationships()
+                    for rel_id, rel in all_relationships.items():
+                        if rel.user_name == user_id:  # user_id 可能实际上是 user_name
+                            relationship = rel
+                            user_id = rel_id  # 更新为真实的 user_id
+                            logger.debug(f"Found user by name: {rel.user_name} -> {user_id}")
+                            break
+                
                 if relationship:
-                    summary = _plugin_instance._social_network.get_relationship_summary(user_id)
+                    summary = await _plugin_instance._social_network.get_relationship_summary(user_id)
                     return {
                         "name": self.name,
                         "content": summary,
@@ -3645,7 +4685,7 @@ class GetSocialNetworkTool(BaseTool):
                     }
             else:
                 # 返回所有用户的摘要 / Return summary of all users
-                all_relationships = _plugin_instance._social_network.get_all_relationships()
+                all_relationships = await _plugin_instance._social_network.get_all_relationships()
 
                 if not all_relationships:
                     return {
@@ -3700,7 +4740,7 @@ class SetRelationshipTool(BaseTool):
     """设置关系工具 / Set Relationship Tool"""
 
     name = "set_user_relationship"
-    description = "设置用户的关系类型，包括陌生人、熟人、朋友、好友、挚友、家人、伴侣、敌人、拉黑。在以下情况下使用此工具：1)用户明确要求改变关系；2)根据互动情况需要调整关系程度；3)需要明确与用户的关系类型。注意：拉黑和敌人关系需要谨慎使用，只有在用户明确要求或有充分理由时才使用。"
+    description = "【重要工具】设置用户的关系类型，包括陌生人、熟人、朋友、好友、挚友、家人、伴侣、敌人、拉黑。在以下情况下必须使用此工具：1)用户明确要求改变关系（如用户说\"我们是朋友了\"、\"拉黑他\"等）；2)根据互动情况需要调整关系程度（如用户一直友好互动，可以将关系升级为朋友；用户态度恶劣，可以设置为敌人）；3)需要明确与用户的关系类型时。注意：拉黑和敌人关系需要谨慎使用，只有在用户明确要求或有充分理由时才使用。此工具与get_social_network_info工具配合使用，先查询当前关系，再根据需要设置新关系。"
     parameters = [
         ("user_id", ToolParamType.STRING, "用户ID，要设置关系的用户", True, None),
         ("relationship_type", ToolParamType.STRING, "关系类型，可选值：stranger(陌生人), acquaintance(熟人), friend(朋友), close_friend(好友), best_friend(挚友), family(家人), partner(伴侣), enemy(敌人), blocked(拉黑)", True, None),
@@ -3758,7 +4798,18 @@ class SetRelationshipTool(BaseTool):
                 }
 
             # 检查用户是否存在 / Check if user exists
-            relationship = _plugin_instance._social_network.get_relationship(user_id)
+            relationship = await _plugin_instance._social_network.get_relationship(user_id)
+            
+            # 如果按 user_id 未找到,尝试按 user_name 查找 / If not found by user_id, try to find by user_name
+            if not relationship:
+                all_relationships = await _plugin_instance._social_network.get_all_relationships()
+                for rel_id, rel in all_relationships.items():
+                    if rel.user_name == user_id:  # user_id 可能实际上是 user_name
+                        relationship = rel
+                        user_id = rel_id  # 更新为真实的 user_id
+                        logger.debug(f"Found user by name for relationship setting: {rel.user_name} -> {user_id}")
+                        break
+            
             if not relationship:
                 return {
                     "name": self.name,
@@ -3825,7 +4876,7 @@ class GetScheduleTool(BaseTool):
     """获取日程工具 / Get Schedule Tool"""
 
     name = "get_life_simulation_schedule"
-    description = "查询机器人的日程安排，包括当前活动、今天的所有活动和日程生成日期。在以下情况下使用此工具：1)用户询问机器人的日程安排；2)需要了解机器人当前正在做什么；3)需要根据日程调整回复内容；4)用户询问机器人是否有空等。此工具返回详细的日程信息，帮助更好地理解机器人的时间安排。"
+    description = "【重要工具】查询机器人的日程安排，包括当前活动、今天的所有活动和日程生成日期。**必须使用的情况**：1)用户询问「你在干嘛」、「在做什么」、「现在在忙什么」等类似问题时，必须调用此工具获取当前活动信息；2)用户询问机器人的日程安排；3)需要了解机器人当前正在做什么；4)需要根据日程调整回复内容；5)用户询问机器人是否有空等。**特别注意**：当用户询问你在做什么时，此工具会返回当前活动信息，你应该根据这个信息来回答用户，比如如果当前活动是「做饭」，你应该回答「我在做饭」。此工具返回详细的日程信息，帮助更好地理解机器人的时间安排。"
     parameters = []
     available_for_llm = True
 
@@ -3938,7 +4989,7 @@ class ModifyScheduleItemTool(BaseTool):
     """修改单个日程活动工具 / Modify Single Schedule Item Tool"""
 
     name = "modify_schedule_item"
-    description = "【重要工具】修改日程中的单个活动。**使用场景**：1)当用户要求修改某个时间段的活动时；2)当机器人想要调整自己的日程安排时；3)当需要根据实际情况（如临时有事、突发状况）调整日程时。**参数说明**：start_time（开始时间，如\"08:00\"）、end_time（结束时间，如\"09:00\"）、activity_type（活动类型，如\"work\"、\"leisure\"、\"meal\"、\"sleep\"、\"exercise\"、\"study\"、\"other\"、\"rest\"、\"medical\"）、description（活动描述，如\"计划起床洗漱\"）、priority（优先级1-5）。**注意事项**：1)活动描述必须使用计划性用词（如\"计划\"、\"安排\"、\"准备\"、\"将\"、\"打算\"）；2)时间段不能与其他活动重叠；3)修改后需要保持时间段连续；4)修改成功后会返回修改后的日程信息。"
+    description = "【重要工具】修改日程中的单个活动，让AI可以替换某个时间段的活动来干自己的事情。**使用场景**：1)当用户要求修改某个时间段的活动时（如\"把下午的安排改成陪我聊天\"）；2)当机器人想要调整自己的日程安排时（如\"我想取消下午的工作，陪朋友出去玩\"）；3)当需要根据实际情况（如临时有事、突发状况）调整日程时（如\"突然有急事，需要把下午的时间空出来\"）；4)当AI想要改变当前活动来陪用户时（如\"我正在学习，但我想停下来陪你聊天\"）。**参数说明**：start_time（开始时间，如\"08:00\"）、end_time（结束时间，如\"09:00\"）、activity_type（活动类型，如\"work\"、\"leisure\"、\"meal\"、\"sleep\"、\"exercise\"、\"study\"、\"other\"、\"rest\"、\"medical\"）、description（活动描述，如\"计划起床洗漱\"）、priority（优先级1-5）。**注意事项**：1)活动描述必须使用计划性用词（如\"计划\"、\"安排\"、\"准备\"、\"将\"、\"打算\"）；2)时间段不能与其他活动重叠；3)修改后需要保持时间段连续；4)修改成功后会返回修改后的日程信息；5)此工具会直接替换指定时间段的活动，请谨慎使用。"
     parameters = [
         {
             "name": "start_time",
@@ -4169,3 +5220,542 @@ class ModifyScheduleItemTool(BaseTool):
                 "content": f"修改日程失败: {str(e)}",
                 "error": str(e)
             }
+
+
+# ============================================================
+# Debug Commands - 测试指令 / Debug Commands - Test Commands
+# ============================================================
+
+class DebugTestEmotionCommand(BaseCommand):
+    """调试命令：测试情绪判断 / Debug Command: Test Emotion Judgment"""
+
+    command_name = "debug_test_emotion"
+    command_description = "测试情绪判断系统 / Test emotion judgment system"
+    command_pattern = r"^/debug_test_emotion$"
+
+    async def execute(self) -> Tuple[bool, Optional[str], int]:
+        if not _plugin_instance:
+            await self.send_text("插件未就绪", storage_message=False)
+            return False, None, 0
+
+        try:
+            logger.info("[DEBUG] DebugTestEmotionCommand: testing emotion judgment")
+            
+            emotion, intensity, reason = await _plugin_instance._judge_emotion()
+            
+            result_msg = f"""🧪 情绪判断测试结果：
+
+😊 情绪: {emotion}
+📊 情绪强度: {intensity}/100
+📝 情绪原因: {reason}
+
+当前状态:
+😴 睡眠状态: {_plugin_instance._state.sleep_state.value}
+😫 疲劳度: {_plugin_instance._state.fatigue}/100
+🍔 饥饿度: {_plugin_instance._state.hunger}/100
+❤️ 健康度: {_plugin_instance._state.health}/100
+🏃 当前活动: {_plugin_instance._state.current_activity_description if _plugin_instance._state.current_activity_description else _plugin_instance._state.current_activity}"""
+            
+            await self.send_text(result_msg, storage_message=False)
+            return True, None, 1
+        except Exception as e:
+            logger.error(f"DebugTestEmotionCommand failed: {e}", exc_info=True)
+            await self.send_text(f"操作失败: {str(e)}", storage_message=False)
+            return False, None, 0
+
+
+class DebugTestDBCommand(BaseCommand):
+    """调试命令：测试数据库系统 / Debug Command: Test Database System"""
+
+    command_name = "debug_test_db"
+    command_description = "测试数据库系统 / Test database system"
+    command_pattern = r"^/debug_test_db$"
+
+    async def execute(self) -> Tuple[bool, Optional[str], int]:
+        if not _plugin_instance:
+            await self.send_text("插件未就绪", storage_message=False)
+            return False, None, 0
+
+        try:
+            logger.info("[DEBUG] DebugTestDBCommand: testing database system")
+            
+            result_msg = "🧪 数据库系统测试结果：\n\n"
+            
+            # 测试数据库连接
+            result_msg += "📡 测试数据库连接...\n"
+            try:
+                await _plugin_instance._social_network._db._ensure_db_initialized()
+                result_msg += "✅ 数据库连接: 正常\n\n"
+            except Exception as e:
+                result_msg += f"❌ 数据库连接: {str(e)}\n\n"
+                await self.send_text(result_msg, storage_message=False)
+                return False, None, 0
+            
+            # 测试数据库写入
+            result_msg += "📝 测试数据库写入...\n"
+            test_user_id = f"test_db_{int(time.time())}"
+            from src.plugin_system import UserRelationship
+            test_relationship = UserRelationship(
+                user_id=test_user_id,
+                user_name="数据库测试用户",
+                relationship_type=RelationshipType.STRANGER,
+                intimacy=50,
+                interaction_count=10,
+                last_interaction_time=time.time(),
+                traits=["测试特征1", "测试特征2"],
+                notes="这是数据库测试备注"
+            )
+            
+            try:
+                await _plugin_instance._social_network._db.update_user(test_relationship)
+                result_msg += f"✅ 数据库写入: 成功 (用户ID: {test_user_id})\n\n"
+            except Exception as e:
+                result_msg += f"❌ 数据库写入: {str(e)}\n\n"
+                await self.send_text(result_msg, storage_message=False)
+                return False, None, 0
+            
+            # 测试数据库读取
+            result_msg += "📖 测试数据库读取...\n"
+            try:
+                retrieved = await _plugin_instance._social_network._db.get_user(test_user_id)
+                if retrieved and retrieved.user_name == "数据库测试用户":
+                    result_msg += f"✅ 数据库读取: 成功\n"
+                    result_msg += f"   - 用户名: {retrieved.user_name}\n"
+                    result_msg += f"   - 关系: {retrieved.relationship_type.value}\n"
+                    result_msg += f"   - 亲密度: {retrieved.intimacy}/100\n"
+                    result_msg += f"   - 特征: {', '.join(retrieved.traits)}\n\n"
+                else:
+                    result_msg += "❌ 数据库读取: 读取的数据不匹配\n\n"
+                    await self.send_text(result_msg, storage_message=False)
+                    return False, None, 0
+            except Exception as e:
+                result_msg += f"❌ 数据库读取: {str(e)}\n\n"
+                await self.send_text(result_msg, storage_message=False)
+                return False, None, 0
+            
+            # 测试缓存机制
+            result_msg += "💾 测试缓存机制...\n"
+            try:
+                # 第一次读取（应该从数据库）
+                first_retrieval = await _plugin_instance._social_network._db.get_user(test_user_id)
+                cache_hit_1 = test_user_id in _plugin_instance._social_network._db._cache
+                result_msg += f"   - 第一次读取: {'缓存命中' if cache_hit_1 else '数据库查询'}\n"
+                
+                # 第二次读取（应该从缓存）
+                second_retrieval = await _plugin_instance._social_network._db.get_user(test_user_id)
+                cache_hit_2 = test_user_id in _plugin_instance._social_network._db._cache
+                result_msg += f"   - 第二次读取: {'缓存命中' if cache_hit_2 else '数据库查询'}\n"
+                
+                if cache_hit_1 and cache_hit_2:
+                    result_msg += "✅ 缓存机制: 正常（LRU工作正常）\n\n"
+                else:
+                    result_msg += "⚠️ 缓存机制: 可能异常\n\n"
+            except Exception as e:
+                result_msg += f"❌ 缓存机制: {str(e)}\n\n"
+            
+            # 测试脏数据管理
+            result_msg += "🧹 测试脏数据管理...\n"
+            try:
+                dirty_count_before = len(_plugin_instance._social_network._db._dirty)
+                result_msg += f"   - 脏数据数量（修改前）: {dirty_count_before}\n"
+                
+                await _plugin_instance._social_network._db.flush_dirty_data()
+                
+                dirty_count_after = len(_plugin_instance._social_network._db._dirty)
+                result_msg += f"   - 脏数据数量（刷新后）: {dirty_count_after}\n"
+                
+                if dirty_count_before > 0 and dirty_count_after == 0:
+                    result_msg += "✅ 脏数据管理: 正常\n\n"
+                else:
+                    result_msg += "⚠️ 脏数据管理: 无脏数据需要刷新\n\n"
+            except Exception as e:
+                result_msg += f"❌ 脏数据管理: {str(e)}\n\n"
+            
+            # 测试数据库索引
+            result_msg += "🔍 测试数据库索引...\n"
+            try:
+                import aiosqlite
+                async with aiosqlite.connect(str(_plugin_instance._db_file)) as db:
+                    async with db.execute("SELECT name FROM sqlite_master WHERE type='index'") as cursor:
+                        indexes = await cursor.fetchall()
+                        result_msg += f"   - 索引数量: {len(indexes)}\n"
+                        for idx in indexes:
+                            result_msg += f"     • {idx[0]}\n"
+                        result_msg += "✅ 数据库索引: 正常\n\n"
+            except Exception as e:
+                result_msg += f"❌ 数据库索引: {str(e)}\n\n"
+            
+            # 测试数据库查询性能
+            result_msg += "⚡ 测试查询性能...\n"
+            try:
+                import time
+                start_time = time.time()
+                
+                # 执行100次查询
+                for i in range(100):
+                    await _plugin_instance._social_network._db.get_user(test_user_id)
+                
+                end_time = time.time()
+                elapsed = (end_time - start_time) * 1000
+                avg_time = elapsed / 100
+                
+                result_msg += f"   - 100次查询耗时: {elapsed:.2f}ms\n"
+                result_msg += f"   - 平均查询时间: {avg_time:.2f}ms\n"
+                
+                if avg_time < 10:
+                    result_msg += "✅ 查询性能: 优秀 (<10ms)\n\n"
+                elif avg_time < 50:
+                    result_msg += "✅ 查询性能: 良好 (<50ms)\n\n"
+                else:
+                    result_msg += "⚠️ 查询性能: 需要优化 (≥50ms)\n\n"
+            except Exception as e:
+                result_msg += f"❌ 查询性能: {str(e)}\n\n"
+            
+            # 清理测试数据
+            result_msg += "🗑️ 清理测试数据...\n"
+            try:
+                await _plugin_instance._social_network._db.delete_user(test_user_id)
+                result_msg += f"✅ 数据清理: 成功 (已删除 {test_user_id})\n\n"
+            except Exception as e:
+                result_msg += f"❌ 数据清理: {str(e)}\n\n"
+            
+            # 数据库文件信息
+            result_msg += "📁 数据库文件信息:\n"
+            try:
+                import os
+                db_size = os.path.getsize(str(_plugin_instance._db_file))
+                result_msg += f"   - 文件路径: {_plugin_instance._db_file}\n"
+                result_msg += f"   - 文件大小: {db_size / 1024:.2f} KB\n"
+                result_msg += f"   - 缓存大小: {_plugin_instance._social_network._db.cache_size} 个用户\n"
+                result_msg += f"   - 当前缓存: {len(_plugin_instance._social_network._db._cache)} 个用户\n"
+                result_msg += f"   - 脏数据: {len(_plugin_instance._social_network._db._dirty)} 个用户\n\n"
+            except Exception as e:
+                result_msg += f"❌ 文件信息: {str(e)}\n\n"
+            
+            result_msg += "🎉 数据库测试完成！"
+            
+            await self.send_text(result_msg, storage_message=False)
+            return True, None, 1
+        except Exception as e:
+            logger.error(f"DebugTestDBCommand failed: {e}", exc_info=True)
+            await self.send_text(f"操作失败: {str(e)}", storage_message=False)
+            return False, None, 0
+
+
+class DebugTestHabitsCommand(BaseCommand):
+    """调试命令：测试习惯系统 / Debug Command: Test Habits System"""
+
+    command_name = "debug_test_habits"
+    command_description = "测试习惯系统 / Test habits system"
+    command_pattern = r"^/debug_test_habits$"
+
+    async def execute(self) -> Tuple[bool, Optional[str], int]:
+        if not _plugin_instance:
+            await self.send_text("插件未就绪", storage_message=False)
+            return False, None, 0
+
+        try:
+            logger.info("[DEBUG] DebugTestHabitsCommand: testing habits system")
+            
+            habits_text = await _plugin_instance._get_habits_text()
+            
+            result_msg = f"""🧪 习惯系统测试结果：
+
+📝 习惯信息:
+{habits_text}
+
+配置信息:
+🤖 使用AI生成: {_plugin_instance.get_config('habits.use_ai_generation', True)}"""
+            
+            await self.send_text(result_msg, storage_message=False)
+            return True, None, 1
+        except Exception as e:
+            logger.error(f"DebugTestHabitsCommand failed: {e}", exc_info=True)
+            await self.send_text(f"操作失败: {str(e)}", storage_message=False)
+            return False, None, 0
+
+
+class DebugTestSocialNetworkCommand(BaseCommand):
+    """调试命令：测试社交网络 / Debug Command: Test Social Network"""
+
+    command_name = "debug_test_social"
+    command_description = "测试社交网络系统 / Test social network system"
+    command_pattern = r"^/debug_test_social$"
+
+    async def execute(self) -> Tuple[bool, Optional[str], int]:
+        if not _plugin_instance:
+            await self.send_text("插件未就绪", storage_message=False)
+            return False, None, 0
+
+        try:
+            logger.info("[DEBUG] DebugTestSocialNetworkCommand: testing social network")
+            
+            social_network = _plugin_instance._social_network.get_all_relationships()
+            
+            result_msg = f"""🧪 社交网络测试结果：
+
+📊 统计信息:
+👥 用户总数: {len(social_network)}
+🔗 社交网络启用: {'是' if _plugin_instance.get_config('social_network.enabled', True) else '否'}
+📈 亲密度增长方式: {_plugin_instance.get_config('social_network.intimacy_growth_method', 'ai')}
+
+用户列表:
+"""
+            
+            for user_id, relationship in social_network.items():
+                result_msg += f"""
+• {user_id}
+  🔗 关系: {relationship.relationship_type.value}
+  💕 亲密度: {relationship.intimacy}/100
+  💬 互动次数: {relationship.interaction_count}
+  📝 备注: {relationship.notes or '无'}
+"""
+            
+            await self.send_text(result_msg, storage_message=False)
+            return True, None, 1
+        except Exception as e:
+            logger.error(f"DebugTestSocialNetworkCommand failed: {e}", exc_info=True)
+            await self.send_text(f"操作失败: {str(e)}", storage_message=False)
+            return False, None, 0
+
+
+class DebugTestScheduleCommand(BaseCommand):
+    """调试命令：测试日程系统 / Debug Command: Test Schedule System"""
+
+    command_name = "debug_test_schedule"
+    command_description = "测试日程系统 / Test schedule system"
+    command_pattern = r"^/debug_test_schedule$"
+
+    async def execute(self) -> Tuple[bool, Optional[str], int]:
+        if not _plugin_instance:
+            await self.send_text("插件未就绪", storage_message=False)
+            return False, None, 0
+
+        try:
+            logger.info("[DEBUG] DebugTestScheduleCommand: testing schedule system")
+            
+            schedule = _plugin_instance._state.schedule
+            current_activity = _plugin_instance._state.current_activity
+            
+            result_msg = f"""🧪 日程系统测试结果：
+
+📊 统计信息:
+📋 日程活动数: {len(schedule)}
+📅 日程生成日期: {_plugin_instance._state.schedule_generated_date}
+🏃 当前活动: {current_activity_description if current_activity_description else current_activity}
+
+日程列表:
+"""
+            
+            for activity in schedule:
+                start_time_str = activity.get("start_time", "")
+                end_time_str = activity.get("end_time", "")
+                activity_type = activity.get("activity_type", "")
+                description = activity.get("description", "")
+                priority = activity.get("priority", 0)
+                
+                time_range = f"{start_time_str}-{end_time_str}" if start_time_str and end_time_str else start_time_str
+                result_msg += f"""
+⏰ {time_range} - {activity_type}
+   📝 {description}
+   🎯 优先级: {priority}
+"""
+            
+            await self.send_text(result_msg, storage_message=False)
+            return True, None, 1
+        except Exception as e:
+            logger.error(f"DebugTestScheduleCommand failed: {e}", exc_info=True)
+            await self.send_text(f"操作失败: {str(e)}", storage_message=False)
+            return False, None, 0
+
+
+class DebugTestEventCommand(BaseCommand):
+    """调试命令：测试随机事件 / Debug Command: Test Random Event"""
+
+    command_name = "debug_test_event"
+    command_description = "测试随机事件生成 / Test random event generation"
+    command_pattern = r"^/debug_test_event$"
+
+    async def execute(self) -> Tuple[bool, Optional[str], int]:
+        if not _plugin_instance:
+            await self.send_text("插件未就绪", storage_message=False)
+            return False, None, 0
+
+        try:
+            logger.info("[DEBUG] DebugTestEventCommand: testing random event generation")
+            
+            event = await _plugin_instance._generate_random_event()
+            
+            if event:
+                result_msg = f"""🧪 随机事件测试结果：
+
+✅ 成功生成事件:
+📋 事件名称: {event.get('event_name', '未知')}
+📝 事件描述: {event.get('description', '无')}
+🎯 事件类型: {event.get('event_type', '未知')}
+📊 发生概率: {event.get('probability', 0.0)}
+
+影响:
+❤️ 健康影响: {event.get('health_impact', 0)}
+😫 疲劳影响: {event.get('fatigue_impact', 0)}
+🍔 饥饿影响: {event.get('hunger_impact', 0)}
+😊 情绪影响: {event.get('emotion_impact', 0)}"""
+            else:
+                result_msg = "🧪 随机事件测试结果:\n\n❌ 未能生成事件（可能概率未触发）"
+            
+            await self.send_text(result_msg, storage_message=False)
+            return True, None, 1
+        except Exception as e:
+            logger.error(f"DebugTestEventCommand failed: {e}", exc_info=True)
+            await self.send_text(f"操作失败: {str(e)}", storage_message=False)
+            return False, None, 0
+
+
+class DebugTestAllCommand(BaseCommand):
+    """调试命令：运行所有测试 / Debug Command: Run All Tests"""
+
+    command_name = "debug_test_all"
+    command_description = "运行所有功能测试 / Run all functional tests"
+    command_pattern = r"^/debug_test_all$"
+
+    async def execute(self) -> Tuple[bool, Optional[str], int]:
+        if not _plugin_instance:
+            await self.send_text("插件未就绪", storage_message=False)
+            return False, None, 0
+
+        try:
+            logger.info("[DEBUG] DebugTestAllCommand: running all tests")
+            
+            result_msg = "🧪 开始运行所有功能测试...\n\n"
+            
+            # 测试情绪判断
+            try:
+                emotion, intensity, reason = await _plugin_instance._judge_emotion()
+                result_msg += f"✅ 情绪判断: {emotion} ({intensity}/100)\n"
+            except Exception as e:
+                result_msg += f"❌ 情绪判断: {str(e)}\n"
+            
+            # 测试习惯系统
+            try:
+                habits_text = await _plugin_instance._get_habits_text()
+                result_msg += f"✅ 习惯系统: 正常 ({len(habits_text)} 字符)\n"
+            except Exception as e:
+                result_msg += f"❌ 习惯系统: {str(e)}\n"
+            
+            # 测试社交网络
+            try:
+                social_network = await _plugin_instance._social_network.get_all_relationships()
+                result_msg += f"✅ 社交网络: {len(social_network)} 个用户\n"
+            except Exception as e:
+                result_msg += f"❌ 社交网络: {str(e)}\n"
+            
+            # 测试数据库系统
+            try:
+                # 测试数据库连接
+                await _plugin_instance._social_network._db._ensure_db_initialized()
+                
+                # 测试数据库写入
+                test_user_id = "test_user_12345"
+                from src.plugin_system import UserRelationship
+                test_relationship = UserRelationship(
+                    user_id=test_user_id,
+                    user_name="测试用户",
+                    relationship_type=RelationshipType.STRANGER,
+                    intimacy=50,
+                    interaction_count=10,
+                    last_interaction_time=time.time(),
+                    traits=["测试特征"],
+                    notes="测试备注"
+                )
+                await _plugin_instance._social_network._db.update_user(test_relationship)
+                
+                # 测试数据库读取
+                retrieved = await _plugin_instance._social_network._db.get_user(test_user_id)
+                if retrieved and retrieved.user_name == "测试用户":
+                    result_msg += f"✅ 数据库系统: 正常 (读写测试通过)\n"
+                else:
+                    result_msg += f"❌ 数据库系统: 读取测试失败\n"
+                
+                # 测试脏数据刷新
+                await _plugin_instance._social_network._db.flush_dirty_data()
+                result_msg += f"✅ 脏数据刷新: 正常\n"
+                
+                # 清理测试数据
+                await _plugin_instance._social_network._db.delete_user(test_user_id)
+                result_msg += f"✅ 数据清理: 正常\n"
+            except Exception as e:
+                result_msg += f"❌ 数据库系统: {str(e)}\n"
+            
+            # 测试日程系统
+            try:
+                schedule = _plugin_instance._state.schedule
+                result_msg += f"✅ 日程系统: {len(schedule)} 个活动\n"
+            except Exception as e:
+                result_msg += f"❌ 日程系统: {str(e)}\n"
+            
+            # 测试随机事件
+            try:
+                event = await _plugin_instance._generate_random_event()
+                if event:
+                    result_msg += f"✅ 随机事件: {event.get('event_name', '未知')}\n"
+                else:
+                    result_msg += f"⚠️ 随机事件: 未生成（概率未触发）\n"
+            except Exception as e:
+                result_msg += f"❌ 随机事件: {str(e)}\n"
+            
+            result_msg += "\n🎉 测试完成！"
+            
+            await self.send_text(result_msg, storage_message=False)
+            return True, None, 1
+        except Exception as e:
+            logger.error(f"DebugTestAllCommand failed: {e}", exc_info=True)
+            await self.send_text(f"操作失败: {str(e)}", storage_message=False)
+            return False, None, 0
+
+
+class DebugHelpCommand(BaseCommand):
+    """调试命令：显示调试帮助 / Debug Command: Show Debug Help"""
+
+    command_name = "debug_help"
+    command_description = "显示所有调试命令的帮助信息 / Show help for all debug commands"
+    command_pattern = r"^/debug_help$"
+
+    async def execute(self) -> Tuple[bool, Optional[str], int]:
+        try:
+            help_msg = """🔧 调试命令帮助 / Debug Commands Help
+
+【状态管理 / State Management】
+/debug_status - 查看详细调试状态
+/debug_sleep - 强制进入睡眠状态
+/debug_wake - 强制从睡眠中醒来
+/debug_set_fatigue <值> - 设置疲劳度 (0-100)
+/debug_set_hunger <值> - 设置饥饿度 (0-100)
+/debug_set_health <值> - 设置健康度 (0-100)
+
+【日程系统 / Schedule System】
+/debug_schedule - 查询日程安排
+/debug_regenerate_schedule - 强制重新生成日程
+/debug_test_schedule - 测试日程系统
+
+【事件系统 / Event System】
+/debug_trigger_event - 强制触发随机事件
+/debug_test_event - 测试随机事件生成
+
+【功能测试 / Function Tests】
+/debug_test_emotion - 测试情绪判断
+/debug_test_habits - 测试习惯系统
+/debug_test_social - 测试社交网络
+/debug_test_db - 测试数据库系统
+/debug_test_all - 运行所有功能测试
+
+【帮助 / Help】
+/debug_help - 显示此帮助信息
+
+💡 提示: 大部分调试命令仅在测试环境使用，生产环境请谨慎使用！"""
+
+            await self.send_text(help_msg, storage_message=False)
+            return True, None, 1
+        except Exception as e:
+            logger.error(f"DebugHelpCommand failed: {e}", exc_info=True)
+            await self.send_text(f"操作失败: {str(e)}", storage_message=False)
+            return False, None, 0

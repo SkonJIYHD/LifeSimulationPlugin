@@ -226,20 +226,20 @@ schedule_generation = """你是一个生活规划助手，需要为机器人生�
 3. JSON格式示例：
 ```json
 [
-  {
+  {{
     "start_time": "00:00",
     "end_time": "08:00",
     "activity_type": "sleep",
     "description": "计划在床上睡觉",
     "priority": 5
-  },
-  {
+  }},
+  {{
     "start_time": "08:00",
     "end_time": "09:00",
     "activity_type": "meal",
     "description": "安排早餐时间",
     "priority": 4
-  }
+  }}
 ]
 ```
 3. 生病系统调整（健康度越高越健康）/ Illness system adjustment (higher health is healthier):
@@ -357,11 +357,11 @@ habit_generation = """【极其重要的规则】你必须严格遵守以下格�
 
 请生成个人习惯，严格按照以下JSON格式：
 
-{
+{{
   "speaking_habits": ["说话习惯1", "说话习惯2"],
   "behavior_habits": ["行为习惯1", "行为习惯2"],
   "interests": ["兴趣1", "兴趣2"],
-  "preferences": {
+  "preferences": {{
     "food": ["食物偏好"],
     "music": ["音乐偏好"],
     "movie": ["电影偏好"],
@@ -369,8 +369,8 @@ habit_generation = """【极其重要的规则】你必须严格遵守以下格�
     "colors": ["颜色偏好"],
     "weather": ["天气偏好"],
     "activities": ["活动偏好"]
-  }
-}
+  }}
+}}
 
 【绝对禁止的格式错误】：
 1. ❌ JSON字符串内部绝对不能使用任何引号（包括中文引号"" ''和英文引号"" ''）
