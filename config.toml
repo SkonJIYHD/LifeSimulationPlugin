@@ -1,0 +1,72 @@
+[plugin]
+enabled = true
+timezone = "Asia/Shanghai"
+
+[schedule]
+sleep_start = "23:00"
+sleep_end = "07:00"
+breakfast_start = "07:30"
+breakfast_end = "08:00"
+lunch_start = "12:00"
+lunch_end = "12:30"
+dinner_start = "18:00"
+dinner_end = "18:30"
+
+[sleep]
+sleepy_duration_minutes = 30
+waking_duration_minutes = 15
+
+[frequency]
+sleeping = -1.0
+exercising = -0.6
+studying = -0.4
+working = -0.4
+eating = -0.2
+leisure = 0.0
+other = 0.0
+
+[relation]
+min_update_interval_minutes = 30
+dirty_queue_max_size = 500
+dirty_queue_ttl_seconds = 7200
+
+[proactive]
+enabled = true
+schedule_transition_probability = 0.4
+waking_probability_factor = 0.3
+global_cooldown_minutes = 30
+per_group_cooldown_minutes = 60
+quiet_hours_start = "23:00"
+quiet_hours_end = "07:00"
+daily_limit = 5
+max_consecutive = 2
+consecutive_reset_after_minutes = 120
+score_threshold = 0.7
+debounce_seconds = 5
+
+[llm]
+timeout_seconds = 30
+max_retries = 2
+max_repair_attempts = 2
+
+[budget]
+llm_schedule_per_day = 3
+llm_impression_per_hour = 50
+llm_proactive_intent_per_hour = 20
+dirty_flush_per_heartbeat = 10
+
+[db]
+checkpoint_interval_minutes = 60
+max_size_mb = 50
+
+[heartbeat]
+interval_seconds = 600
+
+[tool]
+upcoming_count = 3
+upcoming_hours_ahead = 4
+
+[prompts]
+schedule_generation = ""
+impression_update = ""
+proactive_intent = ""

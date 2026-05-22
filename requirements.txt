@@ -1,18 +1,4 @@
-# LifeSimulationPlugin Dependencies
-
-# HTTP 客户端 / HTTP Client
-# 用于自定义时间 API 和节日 API 的网络请求
-aiohttp>=3.8.0
-
-# 异步 SQLite 数据库 / Async SQLite Database
-# 用于社交网络系统的数据存储
-aiosqlite>=0.17.0
-
-# TOML 文件处理 / TOML File Processing
-# 用于读取和写入配置文件
-tomli>=2.0.0
-tomli-w>=1.2.0
-
-# 日期时间处理 / DateTime Processing
-# 用于时间相关的功能
-python-dateutil>=2.8.0
+maibot-plugin-sdk>=2.0.0
+aiosqlite>=0.20.0
+pytest>=8.0.0
+pytest-asyncio>=0.23.0
