@@ -134,7 +134,7 @@ class LifeStateManager:
                 if (now - e.timestamp).total_seconds() < e.ttl_seconds
             ]
             self._state.recent_events.append(event)
-            max_e = self._config.max_recent_events
+            max_e = self._config.plugin.max_recent_events
             if len(self._state.recent_events) > max_e:
                 self._state.recent_events = self._state.recent_events[-max_e:]
 

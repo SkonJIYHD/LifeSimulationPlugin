@@ -11,7 +11,7 @@ from core.state import (
 @pytest.fixture
 def config():
     c = MagicMock()
-    c.max_recent_events = 20
+    c.plugin.max_recent_events = 20
     c.sleep.sleepy_duration_minutes = 30
     c.sleep.waking_duration_minutes = 15
     return c
