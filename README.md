@@ -1,5 +1,4 @@
 # 注意：本插件已经烂尾，因为作者换模型换太多还没做插件工程同步导致现在为一坨大石山，目前不建议使用
-# 预计下周开始使用rinkoai的claude模型+opencode进行大重构
 
 
 # LifeSimulationPlugin - 事件及人体模拟插件
