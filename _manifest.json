@@ -4,7 +4,25 @@
   "version": "2.0.0",
   "name": "Life Simulation",
   "description": "Maibot life simulation plugin",
-  "capabilities": ["send_message"],
+  "author": {
+    "name": "SkonJIYHD",
+    "url": "https://github.com/SkonJIYHD"
+  },
+  "license": "AGPL-3.0",
+  "urls": {
+    "repository": "https://github.com/SkonJIYHD/LifeSimulationPlugin"
+  },
   "host_application": {"min_version": "1.0.0", "max_version": "1.99.99"},
-  "sdk": {"min_version": "2.0.0", "max_version": "2.99.99"}
+  "sdk": {"min_version": "2.0.0", "max_version": "2.99.99"},
+  "capabilities": ["send_message"],
+  "dependencies": [
+    {
+      "type": "python_package",
+      "name": "aiosqlite",
+      "version_spec": ">=0.20.0"
+    }
+  ],
+  "i18n": {
+    "default_locale": "zh-CN"
+  }
 }

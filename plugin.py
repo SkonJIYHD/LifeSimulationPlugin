@@ -3,10 +3,9 @@
 # directly on methods of this MaiBotPlugin subclass.
 # Business logic is delegated to components/ pure functions.
 from __future__ import annotations
-import logging
 import os
 
-from maibot_sdk import MaiBotPlugin, HookHandler, Tool, API, Command
+from maibot_sdk import MaiBotPlugin, HookHandler, Tool, API, Command, CONFIG_RELOAD_SCOPE_SELF
 from maibot_sdk.types import HookMode, HookOrder, ErrorPolicy, ToolParameterInfo, ToolParamType
 
 from config_model import LifeSimConfig
@@ -22,8 +21,6 @@ from components import hooks as hook_logic
 from components import tools as tool_logic
 from components import apis as api_logic
 from components import commands as cmd_logic
-
-logger = logging.getLogger(__name__)
 
 
 class LifeSimulationPlugin(MaiBotPlugin):
@@ -67,7 +64,7 @@ class LifeSimulationPlugin(MaiBotPlugin):
         self.ctx.logger.info("Life Simulation Plugin unloaded")
 
     async def on_config_update(self, scope: str, config_data: dict, version: str) -> None:
-        if scope == "self":
+        if scope == CONFIG_RELOAD_SCOPE_SELF:
             # self.config 已由 SDK 自动更新为最新值
             self._orchestrator.reload_config(self.config)
             self.ctx.logger.info("Config updated, version=%s", version)
@@ -167,7 +164,6 @@ class LifeSimulationPlugin(MaiBotPlugin):
         text = await cmd_logic.build_life_status_text(self._manager, self.config)
         await self.ctx.send.text(text, stream_id)
         return True, text, 1
-
 
 
 def create_plugin() -> LifeSimulationPlugin:
