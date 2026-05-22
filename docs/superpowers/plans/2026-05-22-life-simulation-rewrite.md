@@ -101,12 +101,24 @@ pytest-asyncio>=0.23.0
 
 ```python
 import pytest
+import pytest_asyncio
 import asyncio
 from datetime import datetime, timezone
+
+# pytest-asyncio 0.21+ 需要此配置，否则 async fixture 不被识别
+pytest_plugins = ("pytest_asyncio",)
+
 
 @pytest.fixture
 def utc_now():
     return datetime.now(tz=timezone.utc)
+```
+
+同时创建 `pytest.ini`（与 `plugin.py` 同目录）：
+
+```ini
+[pytest]
+asyncio_mode = auto
 ```
 
 - [ ] **Step 5: 安装依赖并验证**
@@ -2199,13 +2211,219 @@ git commit -m "feat: ProactiveSystem with guard, nonce, debounce, score trigger"
 
 ## Phase E：组件层与集成
 
-### Task E1: Hook 组件（components/hooks.py）
+### Task E1: 组件业务逻辑（components/hooks.py, tools.py, apis.py, commands.py）
+
+**重要说明：** 根据 MaiBot SDK 2.0 官方文档，`@HookHandler`、`@Tool`、`@API`、`@Command` 装饰器**必须直接定义在 `MaiBotPlugin` 子类的方法上**，SDK 只扫描插件类本身。因此 `components/` 目录改为存放纯业务逻辑函数，SDK 装饰器方法全部集中在 `plugin.py` 的 `LifeSimulationPlugin` 类中。
 
 **Files:**
-- Create: `components/hooks.py`
+- Create: `components/hooks.py`（纯逻辑函数，无 SDK 装饰器）
+- Create: `components/tools.py`（纯逻辑函数，无 SDK 装饰器）
+- Create: `components/apis.py`（DTO 定义 + 纯逻辑函数，无 SDK 装饰器）
+- Create: `components/commands.py`（纯逻辑函数，无 SDK 装饰器）
 - Test: `tests/test_hooks.py`
 
-- [ ] **Step 1: 写失败测试**
+- [ ] **Step 1: 实现 components/hooks.py（纯逻辑）**
+
+```python
+# components/hooks.py
+# 纯业务逻辑函数，不含任何 SDK 装饰器
+# SDK 装饰器方法在 plugin.py 的 LifeSimulationPlugin 中定义
+from __future__ import annotations
+import logging
+from core.state import SleepState
+
+logger = logging.getLogger(__name__)
+
+
+async def handle_sleep_gate(manager, stream_registry, **kwargs) -> dict:
+    """Sleep gate logic: abort if sleeping, register stream otherwise."""
+    message = kwargs.get("message", {})
+    snap = manager.snapshot()
+
+    if snap.sleep_state == SleepState.SLEEPING:
+        return {"action": "abort"}
+
+    stream_id = message.get("stream_id")
+    if stream_id:
+        stream_registry.register(stream_id)
+
+    kwargs["message"] = message
+    return {"action": "continue", "modified_kwargs": kwargs}
+
+
+async def observe_interaction(relation, registry, **kwargs) -> None:
+    """Observe message to mark dirty in relation system."""
+    message = kwargs.get("message", {})
+    person_id = (message.get("person_id") or
+                 message.get("user_info", {}).get("person_id"))
+    stream_id = message.get("stream_id")
+    if person_id and stream_id:
+        registry.create_task(
+            relation.mark_interaction(person_id, stream_id, message),
+            name=f"mark_interaction:{message.get('message_id', 'unknown')}",
+        )
+```
+
+- [ ] **Step 2: 实现 components/tools.py（纯逻辑）**
+
+```python
+# components/tools.py
+# 纯业务逻辑函数，不含任何 SDK 装饰器
+from __future__ import annotations
+import logging
+from datetime import timedelta
+from core.state import SleepState
+from utils.hint_helper import build_status_hint, affinity_to_hint
+from utils.time_helper import to_local, now_utc
+
+logger = logging.getLogger(__name__)
+
+
+async def get_life_state_data(manager) -> dict:
+    snap = manager.snapshot()
+    desc = ""
+    now = now_utc()
+    for item in snap.today_schedule:
+        if item.start_time <= now < item.end_time:
+            desc = item.description
+            break
+    return {
+        "status_hint": build_status_hint(
+            snap.current_activity.value, snap.sleep_state.value, desc
+        ),
+        "current_activity": snap.current_activity.value,
+        "sleep_state": snap.sleep_state.value,
+        "can_chat": snap.sleep_state != SleepState.SLEEPING,
+    }
+
+
+async def get_schedule_data(manager, config) -> dict:
+    snap = manager.snapshot()
+    tz = config.plugin.timezone
+    now = now_utc()
+    current_item = None
+    upcoming = []
+    for item in snap.today_schedule:
+        local_start = to_local(item.start_time, tz).strftime("%H:%M")
+        local_end = to_local(item.end_time, tz).strftime("%H:%M")
+        time_str = f"{local_start}-{local_end}"
+        if item.start_time <= now < item.end_time:
+            current_item = {"time": time_str, "description": item.description}
+        elif item.start_time > now:
+            if (item.start_time - now) <= timedelta(hours=config.tool.upcoming_hours_ahead):
+                if len(upcoming) < config.tool.upcoming_count:
+                    upcoming.append({"time": time_str, "description": item.description})
+    return {"current_item": current_item, "upcoming": upcoming}
+
+
+async def get_impression_data(ctx, db, person_name: str) -> dict | None:
+    try:
+        person_id = await ctx.person.get_id_by_name(person_name)
+    except Exception:
+        return None
+    if not person_id:
+        return None
+    imp = await db.get_impression(person_id)
+    if imp is None:
+        return None
+    return {
+        "traits": imp.get("traits", []),
+        "affinity_hint": affinity_to_hint(imp.get("affinity", 0.5)),
+    }
+```
+
+- [ ] **Step 3: 实现 components/apis.py（DTO + 纯逻辑）**
+
+```python
+# components/apis.py
+# DTO 定义和纯逻辑函数，不含任何 SDK 装饰器
+from __future__ import annotations
+import dataclasses
+import logging
+from utils.hint_helper import affinity_to_hint
+from utils.time_helper import to_local
+
+logger = logging.getLogger(__name__)
+
+
+@dataclasses.dataclass
+class LifeStateDTO_v1:
+    schema_version: str = "v1"
+    sleep_state: str = ""
+    current_activity: str = ""
+    schedule_generated_date: str = ""
+
+
+_DTO_BUILDERS = {
+    "v1": lambda snap: LifeStateDTO_v1(
+        sleep_state=snap.sleep_state.value,
+        current_activity=snap.current_activity.value,
+        schedule_generated_date=snap.schedule_generated_date,
+    ),
+}
+
+
+def build_state_dto(snap, schema_version: str = "v1") -> dict:
+    builder = _DTO_BUILDERS.get(schema_version)
+    if builder is None:
+        return {"error": f"Unknown schema_version: {schema_version}"}
+    return dataclasses.asdict(builder(snap))
+
+
+def build_schedule_list(snap, tz: str) -> list[dict]:
+    return [
+        {
+            "start": to_local(item.start_time, tz).strftime("%H:%M"),
+            "end": to_local(item.end_time, tz).strftime("%H:%M"),
+            "activity": item.activity.value,
+            "description": item.description,
+        }
+        for item in snap.today_schedule
+    ]
+
+
+async def get_impression_for_api(db, person_id: str) -> dict | None:
+    imp = await db.get_impression(person_id)
+    if imp is None:
+        return None
+    return {
+        "traits": imp.get("traits", []),
+        "affinity_hint": affinity_to_hint(imp.get("affinity", 0.5)),
+    }
+```
+
+- [ ] **Step 4: 实现 components/commands.py（纯逻辑）**
+
+```python
+# components/commands.py
+# 纯业务逻辑函数，不含任何 SDK 装饰器
+from __future__ import annotations
+import logging
+from utils.time_helper import to_local, now_utc
+
+logger = logging.getLogger(__name__)
+
+
+async def build_life_status_text(manager, config) -> str:
+    snap = manager.snapshot()
+    tz = config.plugin.timezone
+    now = now_utc()
+    lines = [
+        f"Sleep: {snap.sleep_state.value}",
+        f"Activity: {snap.current_activity.value}",
+        f"Schedule date: {snap.schedule_generated_date}",
+        f"Items: {len(snap.today_schedule)}",
+    ]
+    for item in snap.today_schedule:
+        if item.start_time <= now < item.end_time:
+            local_s = to_local(item.start_time, tz).strftime("%H:%M")
+            local_e = to_local(item.end_time, tz).strftime("%H:%M")
+            lines.append(f"Now: {local_s}-{local_e} {item.description}")
+            break
+    return "\n".join(lines)
+```
+
+- [ ] **Step 5: 写失败测试（测试纯逻辑函数）**
 
 ```python
 # tests/test_hooks.py
@@ -2231,121 +2449,40 @@ def make_snap(sleep_state=SleepState.AWAKE):
 
 @pytest.mark.asyncio
 async def test_sleep_gate_aborts_when_sleeping():
-    from components.hooks import LifeSimHooks
-    plugin = MagicMock()
-    plugin._manager.snapshot.return_value = make_snap(SleepState.SLEEPING)
-    plugin._stream_registry = MagicMock()
-    plugin._relation = MagicMock()
-    plugin._registry = MagicMock()
-
-    hooks = LifeSimHooks(plugin)
-    result = await hooks.handle_sleep_gate(message={"stream_id": "s1", "message_id": "m1"})
+    from components.hooks import handle_sleep_gate
+    manager = MagicMock()
+    manager.snapshot.return_value = make_snap(SleepState.SLEEPING)
+    stream_registry = MagicMock()
+    result = await handle_sleep_gate(manager, stream_registry,
+                                     message={"stream_id": "s1", "message_id": "m1"})
     assert result == {"action": "abort"}
 
 
 @pytest.mark.asyncio
 async def test_sleep_gate_continues_when_awake():
-    from components.hooks import LifeSimHooks
-    plugin = MagicMock()
-    plugin._manager.snapshot.return_value = make_snap(SleepState.AWAKE)
-    plugin._stream_registry = MagicMock()
-    plugin._relation = MagicMock()
-    plugin._registry = MagicMock()
-
-    hooks = LifeSimHooks(plugin)
+    from components.hooks import handle_sleep_gate
+    manager = MagicMock()
+    manager.snapshot.return_value = make_snap(SleepState.AWAKE)
+    stream_registry = MagicMock()
     msg = {"stream_id": "s1", "message_id": "m1"}
-    result = await hooks.handle_sleep_gate(message=msg)
+    result = await handle_sleep_gate(manager, stream_registry, message=msg)
     assert result["action"] == "continue"
-    plugin._stream_registry.register.assert_called_once_with("s1")
+    stream_registry.register.assert_called_once_with("s1")
 
 
 @pytest.mark.asyncio
 async def test_observe_interaction_creates_task():
-    from components.hooks import LifeSimHooks
-    plugin = MagicMock()
-    plugin._registry.create_task = MagicMock()
-
-    hooks = LifeSimHooks(plugin)
+    from components.hooks import observe_interaction
+    relation = MagicMock()
+    relation.mark_interaction = AsyncMock()
+    registry = MagicMock()
+    registry.create_task = MagicMock()
     msg = {"stream_id": "s1", "person_id": "p1", "message_id": "m1"}
-    await hooks.observe_interaction(message=msg)
-    plugin._registry.create_task.assert_called_once()
+    await observe_interaction(relation, registry, message=msg)
+    registry.create_task.assert_called_once()
 ```
 
-- [ ] **Step 2: 运行确认失败**
-
-```bash
-pytest tests/test_hooks.py -v
-```
-
-Expected: ImportError
-
-- [ ] **Step 3: 实现 components/hooks.py**
-
-```python
-from __future__ import annotations
-import asyncio
-import logging
-from typing import Any
-
-from maibot_sdk import HookHandler
-from maibot_sdk.types import HookMode, HookOrder, ErrorPolicy
-
-from core.state import SleepState
-
-logger = logging.getLogger(__name__)
-
-
-class LifeSimHooks:
-    """
-    Hook handlers. Injected with plugin instance to access _manager, _registry, etc.
-    Decorators are declarative; method bodies run when called by Host.
-    """
-
-    def __init__(self, plugin: Any):
-        self._plugin = plugin
-
-    @HookHandler(
-        "chat.receive.before_process",
-        name="life_sim_sleep_gate",
-        description="Intercept messages while sleeping",
-        mode=HookMode.BLOCKING,
-        order=HookOrder.EARLY,
-        error_policy=ErrorPolicy.SKIP,
-    )
-    async def handle_sleep_gate(self, **kwargs) -> dict:
-        message = kwargs.get("message", {})
-        snap = self._plugin._manager.snapshot()
-
-        if snap.sleep_state == SleepState.SLEEPING:
-            return {"action": "abort"}
-
-        stream_id = message.get("stream_id")
-        if stream_id:
-            self._plugin._stream_registry.register(stream_id)
-
-        kwargs["message"] = message
-        return {"action": "continue", "modified_kwargs": kwargs}
-
-    @HookHandler(
-        "chat.receive.after_process",
-        name="life_sim_interaction_observer",
-        description="Observe messages to update relation network",
-        mode=HookMode.OBSERVE,
-        order=HookOrder.NORMAL,
-    )
-    async def observe_interaction(self, **kwargs) -> None:
-        message = kwargs.get("message", {})
-        person_id = (message.get("person_id") or
-                     message.get("user_info", {}).get("person_id"))
-        stream_id = message.get("stream_id")
-        if person_id and stream_id:
-            self._plugin._registry.create_task(
-                self._plugin._relation.mark_interaction(person_id, stream_id, message),
-                name=f"mark_interaction:{message.get('message_id', 'unknown')}",
-            )
-```
-
-- [ ] **Step 4: 运行确认通过**
+- [ ] **Step 6: 运行确认通过**
 
 ```bash
 pytest tests/test_hooks.py -v
@@ -2353,283 +2490,33 @@ pytest tests/test_hooks.py -v
 
 Expected: 3 passed
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
-git add components/hooks.py tests/test_hooks.py
-git commit -m "feat: HookHandler for sleep gate and interaction observer"
+git add components/hooks.py components/tools.py components/apis.py components/commands.py tests/test_hooks.py
+git commit -m "feat: component pure logic functions (no SDK decorators)"
 ```
 
 ---
 
-### Task E2: Tool 组件（components/tools.py）
+### Task E2: 插件入口（plugin.py）——所有 SDK 装饰器集中在此
 
 **Files:**
-- Create: `components/tools.py`
+- Create: `plugin.py`（含所有 @HookHandler / @Tool / @API / @Command 方法）
 
-- [ ] **Step 1: 实现 components/tools.py**
+- [ ] **Step 1: 实现 plugin.py**
 
-```python
-from __future__ import annotations
-import logging
-from datetime import timedelta
-from typing import Any
-
-from maibot_sdk import Tool
-from maibot_sdk.types import ToolParameterInfo, ToolParamType
-
-from core.state import SleepState
-from utils.hint_helper import build_status_hint, affinity_to_hint
-from utils.time_helper import to_local, now_utc
-
-logger = logging.getLogger(__name__)
-
-
-class LifeSimTools:
-    def __init__(self, plugin: Any):
-        self._plugin = plugin
-
-    @Tool(
-        "get_life_state",
-        brief_description="Get current life simulation status",
-        detailed_description="Returns current activity, sleep state, and a natural language hint.",
-        parameters=[],
-    )
-    async def get_life_state(self, **kwargs) -> dict:
-        snap = self._plugin._manager.snapshot()
-        desc = ""
-        if snap.today_schedule:
-            for item in snap.today_schedule:
-                now = now_utc()
-                if item.start_time <= now < item.end_time:
-                    desc = item.description
-                    break
-        return {
-            "status_hint": build_status_hint(
-                snap.current_activity.value, snap.sleep_state.value, desc
-            ),
-            "current_activity": snap.current_activity.value,
-            "sleep_state": snap.sleep_state.value,
-            "can_chat": snap.sleep_state != SleepState.SLEEPING,
-        }
-
-    @Tool(
-        "get_today_schedule",
-        brief_description="Get today's schedule",
-        detailed_description="Returns current and upcoming activities (up to 3, within 4 hours).",
-        parameters=[],
-    )
-    async def get_today_schedule(self, **kwargs) -> dict:
-        snap = self._plugin._manager.snapshot()
-        tz = self._plugin._config.plugin.timezone
-        now = now_utc()
-        current_item = None
-        upcoming = []
-
-        for item in snap.today_schedule:
-            local_start = to_local(item.start_time, tz).strftime("%H:%M")
-            local_end = to_local(item.end_time, tz).strftime("%H:%M")
-            time_str = f"{local_start}-{local_end}"
-            if item.start_time <= now < item.end_time:
-                current_item = {"time": time_str, "description": item.description}
-            elif item.start_time > now:
-                hours_ahead = self._plugin._config.tool.upcoming_hours_ahead
-                count = self._plugin._config.tool.upcoming_count
-                if (item.start_time - now) <= timedelta(hours=hours_ahead):
-                    if len(upcoming) < count:
-                        upcoming.append({"time": time_str, "description": item.description})
-
-        return {"current_item": current_item, "upcoming": upcoming}
-
-    @Tool(
-        "get_person_impression",
-        brief_description="Get impression of a person",
-        detailed_description="Parameter: person_name (string). Returns traits and affinity hint.",
-        parameters=[
-            ToolParameterInfo(
-                name="person_name",
-                param_type=ToolParamType.STRING,
-                description="The display name of the person",
-                required=True,
-            ),
-        ],
-    )
-    async def get_person_impression(self, person_name: str, **kwargs) -> dict | None:
-        try:
-            person_id = await self._plugin._ctx.person.get_id_by_name(person_name)
-        except Exception:
-            return None
-        if not person_id:
-            return None
-        imp = await self._plugin._db.get_impression(person_id)
-        if imp is None:
-            return None
-        return {
-            "traits": imp.get("traits", []),
-            "affinity_hint": affinity_to_hint(imp.get("affinity", 0.5)),
-        }
-```
-
-- [ ] **Step 2: Commit**
-
-```bash
-git add components/tools.py
-git commit -m "feat: Tool components for life state, schedule, impression"
-```
-
----
-
-### Task E3: API 组件（components/apis.py）和 Command（components/commands.py）
-
-**Files:**
-- Create: `components/apis.py`
-- Create: `components/commands.py`
-
-- [ ] **Step 1: 实现 components/apis.py**
+所有 SDK 装饰器方法直接定义在 `LifeSimulationPlugin` 类中，调用 `components/` 中的纯逻辑函数。
 
 ```python
 from __future__ import annotations
 import dataclasses
 import logging
+import os
 from typing import Any
 
-from maibot_sdk import API
-
-from utils.hint_helper import affinity_to_hint
-from utils.time_helper import to_local, now_utc
-
-logger = logging.getLogger(__name__)
-
-
-@dataclasses.dataclass
-class LifeStateDTO_v1:
-    schema_version: str = "v1"
-    sleep_state: str = ""
-    current_activity: str = ""
-    schedule_generated_date: str = ""
-
-
-_DTO_BUILDERS = {
-    "v1": lambda snap: LifeStateDTO_v1(
-        sleep_state=snap.sleep_state.value,
-        current_activity=snap.current_activity.value,
-        schedule_generated_date=snap.schedule_generated_date,
-    ),
-}
-
-
-class LifeSimAPIs:
-    def __init__(self, plugin: Any):
-        self._plugin = plugin
-
-    @API("life_sim.get_current_state")
-    async def get_current_state(self, schema_version: str = "v1", **kwargs) -> dict:
-        snap = self._plugin._manager.snapshot()
-        builder = _DTO_BUILDERS.get(schema_version)
-        if builder is None:
-            return {"error": f"Unknown schema_version: {schema_version}"}
-        return dataclasses.asdict(builder(snap))
-
-    @API("life_sim.get_schedule")
-    async def get_schedule(self, **kwargs) -> list[dict]:
-        snap = self._plugin._manager.snapshot()
-        tz = self._plugin._config.plugin.timezone
-        return [
-            {
-                "start": to_local(item.start_time, tz).strftime("%H:%M"),
-                "end": to_local(item.end_time, tz).strftime("%H:%M"),
-                "activity": item.activity.value,
-                "description": item.description,
-            }
-            for item in snap.today_schedule
-        ]
-
-    @API("life_sim.get_impression")
-    async def get_impression(self, person_id: str, **kwargs) -> dict | None:
-        imp = await self._plugin._db.get_impression(person_id)
-        if imp is None:
-            return None
-        return {
-            "traits": imp.get("traits", []),
-            "affinity_hint": affinity_to_hint(imp.get("affinity", 0.5)),
-        }
-
-    @API("life_sim.get_frequency_factor")
-    async def get_frequency_factor(self, **kwargs) -> float:
-        snap = self._plugin._manager.snapshot()
-        freq = self._plugin._config.frequency
-        return freq.get(snap.current_activity.value, 0.0)
-
-    @API("life_sim.get_sleep_state")
-    async def get_sleep_state(self, **kwargs) -> str:
-        return self._plugin._manager.snapshot().sleep_state.value
-```
-
-- [ ] **Step 2: 实现 components/commands.py**
-
-```python
-from __future__ import annotations
-import logging
-from typing import Any
-
-from maibot_sdk import Command
-
-from utils.time_helper import to_local, now_utc
-
-logger = logging.getLogger(__name__)
-
-
-class LifeSimCommands:
-    def __init__(self, plugin: Any):
-        self._plugin = plugin
-
-    @Command("life_status", pattern=r"^/life_status")
-    async def handle_life_status(self, **kwargs) -> tuple:
-        stream_id = kwargs.get("stream_id", "")
-        snap = self._plugin._manager.snapshot()
-        tz = self._plugin._config.plugin.timezone
-        now = now_utc()
-
-        lines = [
-            f"Sleep: {snap.sleep_state.value}",
-            f"Activity: {snap.current_activity.value}",
-            f"Schedule date: {snap.schedule_generated_date}",
-            f"Items: {len(snap.today_schedule)}",
-        ]
-        for item in snap.today_schedule:
-            if item.start_time <= now < item.end_time:
-                local_s = to_local(item.start_time, tz).strftime("%H:%M")
-                local_e = to_local(item.end_time, tz).strftime("%H:%M")
-                lines.append(f"Now: {local_s}-{local_e} {item.description}")
-                break
-
-        text = "\n".join(lines)
-        await self._plugin._ctx.send.text(text, stream_id)
-        return True, text, 1
-```
-
-- [ ] **Step 3: Commit**
-
-```bash
-git add components/apis.py components/commands.py
-git commit -m "feat: API components (DTO versioned) and /life_status command"
-```
-
----
-
-### Task E4: 插件入口（plugin.py）
-
-**Files:**
-- Create: `plugin.py`
-
-- [ ] **Step 1: 实现 plugin.py**
-
-```python
-from __future__ import annotations
-import logging
-from typing import Any
-
-from maibot_sdk import MaiBotPlugin
+from maibot_sdk import MaiBotPlugin, HookHandler, Tool, API, Command
+from maibot_sdk.types import HookMode, HookOrder, ErrorPolicy, ToolParameterInfo, ToolParamType
 
 from core.state import LifeStateManager
 from core.database import Database
@@ -2638,20 +2525,24 @@ from core.orchestrator import Orchestrator, BackgroundTaskRegistry, StreamRegist
 from systems.schedule import ScheduleSystem
 from systems.relation import RelationSystem
 from systems.proactive import ProactiveSystem
-from components.hooks import LifeSimHooks
-from components.tools import LifeSimTools
-from components.apis import LifeSimAPIs
-from components.commands import LifeSimCommands
+from components import hooks as hook_logic
+from components import tools as tool_logic
+from components import apis as api_logic
+from components import commands as cmd_logic
 
 logger = logging.getLogger(__name__)
 
 
 class LifeSimulationPlugin(MaiBotPlugin):
+
+    # ── Lifecycle ──────────────────────────────────────────────────────────
+
     async def on_load(self) -> None:
         config = await self._load_config()
-
         self._config = config
-        self._db = Database(f"data/life_simulation.db")
+
+        os.makedirs("data", exist_ok=True)
+        self._db = Database("data/life_simulation.db")
         self._manager = LifeStateManager(config)
         self._budget = ResourceBudget(config.budget)
         self._stream_registry = StreamRegistry()
@@ -2669,27 +2560,192 @@ class LifeSimulationPlugin(MaiBotPlugin):
             db=self._db, ctx=self.ctx,
             manager=self._manager, budget=self._budget, config=config,
         )
-
         self._orchestrator = Orchestrator(
-            manager=self._manager,
-            db=self._db,
-            budget=self._budget,
-            schedule_sys=self._schedule_sys,
-            relation_sys=self._relation,
-            proactive_sys=self._proactive,
-            ctx=self.ctx,
-            config=config,
+            manager=self._manager, db=self._db, budget=self._budget,
+            schedule_sys=self._schedule_sys, relation_sys=self._relation,
+            proactive_sys=self._proactive, ctx=self.ctx, config=config,
             stream_registry=self._stream_registry,
         )
-
-        # Component instances (decorators are declarative, bodies run on call)
-        self._hooks = LifeSimHooks(self)
-        self._tools = LifeSimTools(self)
-        self._apis = LifeSimAPIs(self)
-        self._commands = LifeSimCommands(self)
-
         await self._orchestrator.start()
         self.ctx.logger.info("Life Simulation Plugin loaded")
+
+    async def on_unload(self) -> None:
+        if hasattr(self, "_orchestrator"):
+            await self._orchestrator.stop()
+        self.ctx.logger.info("Life Simulation Plugin unloaded")
+
+    async def on_config_update(self, scope: str, config_data: dict, version: str) -> None:
+        if scope == "self":
+            config = self._parse_config(config_data)
+            self._config = config
+            self._orchestrator.reload_config(config)
+            self.ctx.logger.info("Config updated, version=%s", version)
+
+    # ── Hook Handlers（必须在此类中定义，SDK 扫描本类方法）──────────────────
+
+    @HookHandler(
+        "chat.receive.before_process",
+        name="life_sim_sleep_gate",
+        description="Intercept messages while sleeping",
+        mode=HookMode.BLOCKING,
+        order=HookOrder.EARLY,
+        error_policy=ErrorPolicy.SKIP,
+    )
+    async def _hook_sleep_gate(self, **kwargs) -> dict:
+        return await hook_logic.handle_sleep_gate(
+            self._manager, self._stream_registry, **kwargs
+        )
+
+    @HookHandler(
+        "chat.receive.after_process",
+        name="life_sim_interaction_observer",
+        description="Observe messages to update relation network",
+        mode=HookMode.OBSERVE,
+        order=HookOrder.NORMAL,
+    )
+    async def _hook_observe_interaction(self, **kwargs) -> None:
+        await hook_logic.observe_interaction(self._relation, self._registry, **kwargs)
+
+    # ── Tools（必须在此类中定义）────────────────────────────────────────────
+
+    @Tool(
+        "get_life_state",
+        brief_description="Get current life simulation status",
+        detailed_description="Returns current activity, sleep state, and a natural language hint.",
+        parameters=None,
+    )
+    async def _tool_get_life_state(self, **kwargs) -> dict:
+        return await tool_logic.get_life_state_data(self._manager)
+
+    @Tool(
+        "get_today_schedule",
+        brief_description="Get today's schedule",
+        detailed_description="Returns current and upcoming activities (up to 3, within 4 hours).",
+        parameters=None,
+    )
+    async def _tool_get_today_schedule(self, **kwargs) -> dict:
+        return await tool_logic.get_schedule_data(self._manager, self._config)
+
+    @Tool(
+        "get_person_impression",
+        brief_description="Get impression of a person by name",
+        detailed_description="Parameter: person_name (string). Returns traits and affinity hint.",
+        parameters=[
+            ToolParameterInfo(
+                name="person_name",
+                param_type=ToolParamType.STRING,
+                description="The display name of the person",
+                required=True,
+            ),
+        ],
+    )
+    async def _tool_get_person_impression(self, person_name: str, **kwargs) -> dict | None:
+        return await tool_logic.get_impression_data(self.ctx, self._db, person_name)
+
+    # ── APIs（必须在此类中定义）─────────────────────────────────────────────
+
+    @API("life_sim.get_current_state")
+    async def _api_get_current_state(self, schema_version: str = "v1", **kwargs) -> dict:
+        return api_logic.build_state_dto(self._manager.snapshot(), schema_version)
+
+    @API("life_sim.get_schedule")
+    async def _api_get_schedule(self, **kwargs) -> list[dict]:
+        return api_logic.build_schedule_list(
+            self._manager.snapshot(), self._config.plugin.timezone
+        )
+
+    @API("life_sim.get_impression")
+    async def _api_get_impression(self, person_id: str, **kwargs) -> dict | None:
+        return await api_logic.get_impression_for_api(self._db, person_id)
+
+    @API("life_sim.get_frequency_factor")
+    async def _api_get_frequency_factor(self, **kwargs) -> float:
+        snap = self._manager.snapshot()
+        return self._config.frequency.get(snap.current_activity.value, 0.0)
+
+    @API("life_sim.get_sleep_state")
+    async def _api_get_sleep_state(self, **kwargs) -> str:
+        return self._manager.snapshot().sleep_state.value
+
+    # ── Commands（必须在此类中定义）─────────────────────────────────────────
+
+    @Command("life_status", pattern=r"^/life_status")
+    async def _cmd_life_status(self, **kwargs) -> tuple:
+        stream_id = kwargs.get("stream_id", "")
+        text = await cmd_logic.build_life_status_text(self._manager, self._config)
+        await self.ctx.send.text(text, stream_id)
+        return True, text, 1
+
+    # ── Config helpers ───────────────────────────────────────────────────────
+
+    async def _load_config(self) -> Any:
+        raw = await self.ctx.config.get_all()
+        return self._parse_config(raw)
+
+    def _parse_config(self, raw: dict) -> Any:
+        from types import SimpleNamespace
+
+        def ns(d: dict) -> Any:
+            obj = SimpleNamespace()
+            for k, v in d.items():
+                setattr(obj, k, ns(v) if isinstance(v, dict) else v)
+            return obj
+
+        defaults = {
+            "plugin": {"enabled": True, "timezone": "Asia/Shanghai"},
+            "schedule": {
+                "sleep_start": "23:00", "sleep_end": "07:00",
+                "breakfast_start": "07:30", "breakfast_end": "08:00",
+                "lunch_start": "12:00", "lunch_end": "12:30",
+                "dinner_start": "18:00", "dinner_end": "18:30",
+            },
+            "sleep": {"sleepy_duration_minutes": 30, "waking_duration_minutes": 15},
+            "frequency": {
+                "sleeping": -1.0, "exercising": -0.6,
+                "studying": -0.4, "working": -0.4,
+                "eating": -0.2, "leisure": 0.0, "other": 0.0,
+            },
+            "relation": {
+                "min_update_interval_minutes": 30,
+                "dirty_queue_max_size": 500,
+                "dirty_queue_ttl_seconds": 7200,
+            },
+            "proactive": {
+                "enabled": True, "schedule_transition_probability": 0.4,
+                "waking_probability_factor": 0.3, "global_cooldown_minutes": 30,
+                "per_group_cooldown_minutes": 60, "quiet_hours_start": "23:00",
+                "quiet_hours_end": "07:00", "daily_limit": 5, "max_consecutive": 2,
+                "consecutive_reset_after_minutes": 120, "score_threshold": 0.7,
+                "debounce_seconds": 5,
+            },
+            "llm": {"timeout_seconds": 30, "max_retries": 2, "max_repair_attempts": 2},
+            "budget": {
+                "llm_schedule_per_day": 3, "llm_impression_per_hour": 50,
+                "llm_proactive_intent_per_hour": 20, "dirty_flush_per_heartbeat": 10,
+            },
+            "db": {"checkpoint_interval_minutes": 60, "max_size_mb": 50},
+            "heartbeat": {"interval_seconds": 600},
+            "tool": {"upcoming_count": 3, "upcoming_hours_ahead": 4},
+            "prompts": {"schedule_generation": "", "impression_update": "", "proactive_intent": ""},
+        }
+
+        def deep_merge(base: dict, override: dict) -> dict:
+            result = dict(base)
+            for k, v in override.items():
+                if isinstance(v, dict) and isinstance(result.get(k), dict):
+                    result[k] = deep_merge(result[k], v)
+                else:
+                    result[k] = v
+            return result
+
+        merged = deep_merge(defaults, raw or {})
+        config = ns(merged)
+        config.max_recent_events = 20
+        return config
+
+
+def create_plugin() -> LifeSimulationPlugin:
+    return LifeSimulationPlugin()
 
     async def on_unload(self) -> None:
         if hasattr(self, "_orchestrator"):
@@ -2806,13 +2862,30 @@ pytest tests/ -v --tb=short
 
 Expected: all passed (目标: 30+ tests)
 
-- [ ] **Step 2: 检查 import 是否有循环依赖**
+- [ ] **Step 2: 检查核心模块 import 无循环依赖**
 
 ```bash
-python -c "import plugin; print('import ok')"
+python -c "
+from core.state import LifeStateManager, ActivityType, SleepState
+from core.database import Database
+from core.budget import ResourceBudget
+from core.orchestrator import Orchestrator, StreamRegistry, BackgroundTaskRegistry
+from systems.sleep import derive_sleep_state
+from systems.schedule import ScheduleSystem, calc_next_transition, get_missed_transitions
+from systems.relation import RelationSystem, DirtyQueue
+from systems.proactive import ProactiveSystem
+from components.hooks import handle_sleep_gate
+from components.tools import get_life_state_data
+from components.apis import build_state_dto
+from components.commands import build_life_status_text
+from utils.time_helper import now_utc
+from utils.hint_helper import build_status_hint
+print('all imports ok')
+"
 ```
 
-Expected: import ok
+Expected: all imports ok
+（注意：plugin.py 依赖 maibot_sdk，不在此处检查）
 
 - [ ] **Step 3: 验证 DB schema 正确创建**
 
@@ -2854,9 +2927,9 @@ git commit -m "feat: v2.0 complete rewrite - all systems implemented"
 | 4.6 StreamRegistry + 批量 set_adjust | B4（_apply_frequency） | 覆盖 |
 | 4.7 RelationSystem + DirtyQueue | C1 | 覆盖 |
 | 4.8 ProactiveSystem + guard + nonce | D1 | 覆盖 |
-| 4.9 HookHandler 正确 SDK 名称 | E1 | 覆盖 |
-| 4.10 Tool 摘要态 hint | E2 | 覆盖 |
-| 4.11 API DTO versioned | E3 | 覆盖 |
+| 4.9 HookHandler 正确 SDK 名称 | E1（plugin.py 中直接定义） | 覆盖 |
+| 4.10 Tool 摘要态 hint | E1（plugin.py + components/tools.py） | 覆盖 |
+| 4.11 API DTO versioned | E1（plugin.py + components/apis.py） | 覆盖 |
 | 4.12 ResourceBudget | B1 | 覆盖 |
 | 4.13 llm_helper timeout/retry/schema | B1 | 覆盖 |
 | 4.14 time_helper UTC | A2 | 覆盖 |
