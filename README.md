@@ -36,44 +36,32 @@
 
 ## 配置
 
-配置文件：`config.toml`，所有字段均有默认值，按需修改。
+配置通过 MaiBot WebUI 的插件配置页面直接编辑，无需手动修改文件。所有字段均有默认值和说明。
 
-```toml
-[plugin]
-timezone = "Asia/Shanghai"      # 展示层时区
+配置分组：
 
-[schedule]
-sleep_start = "23:00"           # 睡觉开始时间（本地时间）
-sleep_end = "07:00"             # 起床时间
+| 分组 | 说明 |
+|------|------|
+| 基础设置 | 启用开关、时区、最近事件缓存数 |
+| 日程设置 | 睡眠/三餐时间段 |
+| 睡眠系统 | 困倦/苏醒过渡时长 |
+| 发言频率调整 | 各活动类型对应的频率调整值（-1.0 ~ 1.0） |
+| 关系网设置 | 印象更新间隔、队列大小 |
+| 主动行为设置 | 触发概率、冷却、静默时段、每日上限 |
+| LLM 调用设置 | 超时、重试次数 |
+| 调用预算 | 各类 LLM 调用的每日/每小时上限 |
+| 数据库设置 | WAL checkpoint 间隔、体积上限 |
+| 心跳设置 | 心跳间隔 |
+| Tool 输出设置 | `get_today_schedule` 返回条数和前瞻时间 |
+| 自定义提示词 | 覆盖内置提示词模板（留空使用内置） |
 
-[sleep]
-sleepy_duration_minutes = 30    # 进入睡眠状态前的困倦时长
-waking_duration_minutes = 15    # 睡醒后的苏醒过渡时长
+自定义提示词可用变量：
 
-[frequency]
-# 各活动类型对应的发言频率调整值（-1.0 ~ 1.0）
-sleeping = -1.0
-working = -0.4
-eating = -0.2
-leisure = 0.0
+- `schedule_generation`：`{personality}` `{date}` `{skeleton}`
+- `impression_update`：`{personality}` `{person_name}` `{recent_messages}` `{old_impression}`
+- `proactive_intent`：`{state}` `{activity}` `{description}`
 
-[proactive]
-enabled = true
-daily_limit = 5                 # 每天最多主动发消息次数
-quiet_hours_start = "23:00"     # 安静时段（不主动发消息）
-quiet_hours_end = "07:00"
-
-[prompts]
-# 留空使用内置提示词模板；填写则覆盖
-# 可用变量：{personality} {date} {skeleton}
-schedule_generation = ""
-# 可用变量：{personality} {person_name} {recent_messages} {old_impression}
-impression_update = ""
-# 可用变量：{state} {activity} {description}
-proactive_intent = ""
-```
-
-完整配置项参见 `config.toml`。
+配置模型定义见 `config_model.py`。
 
 ---
 
@@ -132,7 +120,7 @@ state = await ctx.api.call("life_sim.get_current_state")
 ```
 life-simulation/
 ├── plugin.py               # 入口（所有 SDK 组件在此注册）
-├── config.toml             # 默认配置
+├── config_model.py         # 配置模型（PluginConfigBase，生成 WebUI Schema）
 ├── core/
 │   ├── state.py            # 状态管理（LifeStateManager）
 │   ├── database.py         # SQLite WAL 数据库
