@@ -8,6 +8,7 @@ from typing import Any
 class ResourceBudget:
     """
     per-hour LLM 调用预算（滑动窗口，内存）。
+    schedule 使用 per-day 窗口（86400s），其余 per-hour（3600s）。
     proactive daily 预算由 ProactiveGuard 管理，Budget 不重复维护。
     dirty_flush 每 heartbeat 上限通过 get_flush_limit() 获取。
     """
@@ -18,7 +19,8 @@ class ResourceBudget:
         self._hourly: dict[str, list[float]] = defaultdict(list)
 
     def _cleanup(self, key: str) -> None:
-        cutoff = time.time() - 3600
+        window = 86400 if key == "schedule" else 3600
+        cutoff = time.time() - window
         self._hourly[key] = [t for t in self._hourly[key] if t > cutoff]
 
     def can_llm_call(self, call_type: str) -> bool:

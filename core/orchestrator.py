@@ -146,7 +146,10 @@ class Orchestrator:
             logger.error("proactive.on_transition failed: %s", e)
 
         # 3. 持久化（必须执行）
-        await self._db.enqueue_write(self._make_persist_op())
+        await (await self._db.enqueue_write(self._make_persist_op()))
+
+        # 3.5 持久化 processed_transition（幂等恢复用）
+        await self._db.save_processed_transition(transition_id)
 
         # 4. 追加 recent_event
         await self._manager.append_event(RecentEvent(
@@ -163,6 +166,8 @@ class Orchestrator:
             "prev_activity": snap.prev_activity.value,
             "sleep_state": snap.sleep_state.value,
             "schedule_generated_date": snap.schedule_generated_date,
+            "activity_since": snap.activity_since.isoformat(),
+            "last_transition_processed_at": snap.last_transition_processed_at.isoformat(),
         }
         serialized = json.dumps(data)
         ts = time.time()
@@ -252,6 +257,11 @@ class Orchestrator:
         local_today = local_date_str(tz)
         if self._manager.snapshot().schedule_generated_date != local_today:
             await self._schedule.generate(local_today, is_recovery=True)
+            # 生成新日程后立即同步当前活动
+            snap = self._manager.snapshot()
+            current_act = schedule_mod.get_current_activity(snap, now_utc())
+            tid = f"recovery_sync:{now_utc().isoformat()}:{current_act.value}"
+            await self._on_transition(current_act, tid, is_missed=True)
 
         # 6. repair missed transitions（不触发 proactive）
         snap = self._manager.snapshot()
@@ -262,4 +272,9 @@ class Orchestrator:
 
     def reload_config(self, config: Any) -> None:
         self._config = config
+        self._schedule._config = config
+        self._relation._config = config
+        self._proactive._config = config
+        self._budget._config = config
+        self._manager._config = config
         logger.info("Orchestrator config reloaded")

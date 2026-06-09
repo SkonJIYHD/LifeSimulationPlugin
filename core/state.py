@@ -145,6 +145,12 @@ class LifeStateManager:
             s.prev_activity = ActivityType(data.get("prev_activity", "other"))
             s.sleep_state = SleepState(data.get("sleep_state", "awake"))
             s.schedule_generated_date = data.get("schedule_generated_date", "")
+            if "activity_since" in data:
+                s.activity_since = datetime.fromisoformat(data["activity_since"])
+            if "last_transition_processed_at" in data:
+                s.last_transition_processed_at = datetime.fromisoformat(
+                    data["last_transition_processed_at"]
+                )
 
     async def restore_processed_transitions(
         self, transitions: dict[str, float]

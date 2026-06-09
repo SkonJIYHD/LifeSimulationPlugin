@@ -146,6 +146,14 @@ class ProactiveSystem:
             self._guard._nonce_registry.pop(nonce, None)
             return
 
+        # Phase 2.5：重新检查 guard 条件（世界可能在 LLM 调用期间变化）
+        async with self._guard._lock:
+            current_snap = self._manager.snapshot()
+            if not _check_guard_conditions(self._guard, stream_id, current_snap, self._config):
+                await self._db.delete_nonce(nonce)
+                self._guard._nonce_registry.pop(nonce, None)
+                return
+
         # Phase 3：触发 maisaka
         try:
             await self._ctx.maisaka.proactive.trigger(

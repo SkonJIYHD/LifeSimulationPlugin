@@ -9,7 +9,40 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 _JSON_BLOCK_RE = re.compile(r'```(?:json)?\s*([\s\S]*?)```', re.IGNORECASE)
-_JSON_OBJ_RE = re.compile(r'\{[\s\S]*\}', re.DOTALL)
+
+
+def _find_json_candidates(text: str) -> list[str]:
+    """Find all potential JSON object substrings using brace-depth tracking."""
+    candidates = []
+    i = 0
+    while i < len(text):
+        if text[i] == '{':
+            depth = 0
+            in_string = False
+            escape = False
+            for j in range(i, len(text)):
+                ch = text[j]
+                if escape:
+                    escape = False
+                    continue
+                if ch == '\\' and in_string:
+                    escape = True
+                    continue
+                if ch == '"' and not escape:
+                    in_string = not in_string
+                    continue
+                if not in_string:
+                    if ch == '{':
+                        depth += 1
+                    elif ch == '}':
+                        depth -= 1
+                        if depth == 0:
+                            candidates.append(text[i:j + 1])
+                            break
+            i = j + 1 if depth == 0 else i + 1
+        else:
+            i += 1
+    return candidates
 
 
 def _parse_json(text: str) -> dict | None:
@@ -25,13 +58,12 @@ def _parse_json(text: str) -> dict | None:
             return json.loads(m.group(1).strip())
         except json.JSONDecodeError:
             pass
-    # 3. 提取第一个 {...}
-    m = _JSON_OBJ_RE.search(text)
-    if m:
+    # 3. 提取所有 {...} 块（支持嵌套），尝试每个作为 JSON
+    for candidate in _find_json_candidates(text):
         try:
-            return json.loads(m.group(0))
+            return json.loads(candidate)
         except json.JSONDecodeError:
-            pass
+            continue
     return None
 
 

@@ -94,3 +94,71 @@ async def test_trigger_calls_maisaka(config):
     sys = ProactiveSystem(db=db, ctx=ctx, manager=manager, budget=budget, config=config)
     await sys.trigger("stream-1", "Just finished lunch", "transition", "tid-001")
     ctx.maisaka.proactive.trigger.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_trigger_rechecks_guards_before_send(config):
+    """Fix 8: trigger should re-check guard conditions after LLM call."""
+    db = MagicMock()
+    db.nonce_exists = AsyncMock(return_value=False)
+    db.register_nonce = AsyncMock()
+    db.delete_nonce = AsyncMock()
+    db.save_proactive_guard_state = AsyncMock()
+    ctx = MagicMock()
+    ctx.maisaka.proactive.trigger = AsyncMock()
+
+    config.prompts.proactive_intent = ""
+
+    manager = MagicMock()
+    # First snapshot: AWAKE (passes guard)
+    snap_awake = MagicMock()
+    snap_awake.sleep_state = SleepState.AWAKE
+    snap_awake.schedule_is_repair = False
+    # Second snapshot: SLEEPING (fails re-check)
+    snap_sleeping = MagicMock()
+    snap_sleeping.sleep_state = SleepState.SLEEPING
+
+    call_count = 0
+    def mock_snapshot():
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return snap_awake
+        return snap_sleeping
+
+    manager.snapshot.side_effect = mock_snapshot
+    budget = MagicMock()
+
+    sys = ProactiveSystem(db=db, ctx=ctx, manager=manager, budget=budget, config=config)
+    await sys.trigger("stream-1", "Hello", "transition", "tid-002")
+
+    # Should NOT have called maisaka because re-check found SLEEPING
+    ctx.maisaka.proactive.trigger.assert_not_called()
+    # Should have cleaned up nonce
+    db.delete_nonce.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_trigger_succeeds_when_recheck_passes(config):
+    """Fix 8: trigger should send when re-check also passes."""
+    db = MagicMock()
+    db.nonce_exists = AsyncMock(return_value=False)
+    db.register_nonce = AsyncMock()
+    db.delete_nonce = AsyncMock()
+    db.save_proactive_guard_state = AsyncMock()
+    ctx = MagicMock()
+    ctx.maisaka.proactive.trigger = AsyncMock()
+
+    config.prompts.proactive_intent = ""
+
+    manager = MagicMock()
+    snap = MagicMock()
+    snap.sleep_state = SleepState.AWAKE
+    snap.schedule_is_repair = False
+    manager.snapshot.return_value = snap
+    budget = MagicMock()
+
+    sys = ProactiveSystem(db=db, ctx=ctx, manager=manager, budget=budget, config=config)
+    await sys.trigger("stream-1", "Hello", "transition", "tid-003")
+
+    ctx.maisaka.proactive.trigger.assert_awaited_once()

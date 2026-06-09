@@ -56,3 +56,56 @@ async def test_mark_interaction_updates_db():
     await sys.mark_interaction("p1", "stream-1", {"message_id": "m1"})
     db.update_person_stream.assert_awaited_once()
     db.mark_dirty.assert_awaited_once_with("p1")
+
+
+@pytest.mark.asyncio
+async def test_flush_preserves_last_interaction():
+    """Fix 6: impression refresh should preserve last_interaction from old impression."""
+    import time as _time
+    from datetime import datetime, timezone
+
+    old_interaction_ts = _time.time() - 86400 * 5  # 5 days ago
+
+    db = MagicMock()
+    db.get_impression = AsyncMock(return_value={
+        "person_id": "p1",
+        "person_name": "Alice",
+        "traits": ["kind"],
+        "affinity": 0.5,
+        "proactive_score": 0.3,
+        "last_interaction": old_interaction_ts,
+        "last_impression_update": _time.time() - 3600,
+    })
+    db.save_impression = AsyncMock()
+    db.enqueue_write = AsyncMock(return_value=AsyncMock())
+
+    ctx = MagicMock()
+    ctx.message.get_recent = AsyncMock(return_value=[])
+
+    budget = MagicMock()
+    budget.get_flush_limit.return_value = 10
+    budget.can_llm_call.return_value = True
+    budget.record_llm = MagicMock()
+
+    config = MagicMock()
+    config.min_update_interval_minutes = 30
+    config.dirty_queue_max_size = 500
+    config.dirty_queue_ttl_seconds = 7200
+    config.prompts.impression_update = ""
+
+    sys = RelationSystem(db=db, ctx=ctx, budget=budget, config=config)
+    sys._dirty_queue.mark("p1", "stream-1")
+
+    import unittest.mock as um
+
+    with um.patch("utils.llm_helper.generate_json", new_callable=AsyncMock) as mock_gen:
+        mock_gen.return_value = {
+            "traits": ["friendly"],
+            "affinity": 0.6,
+            "had_recent_interaction": False,
+        }
+        await sys.flush_dirty_impressions()
+
+    saved_imp = db.save_impression.call_args[0][0]
+    assert "last_interaction" in saved_imp
+    assert saved_imp["last_interaction"] == old_interaction_ts

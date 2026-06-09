@@ -82,3 +82,40 @@ async def test_append_event_prunes_expired(manager):
     await manager.append_event(new)
     descs = [e.description for e in manager.snapshot().recent_events]
     assert "old" not in descs and "new" in descs
+
+
+@pytest.mark.asyncio
+async def test_restore_includes_timing_fields(manager):
+    """Fix 3: restore should set activity_since and last_transition_processed_at."""
+    ts = datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
+    data = {
+        "current_activity": "working",
+        "prev_activity": "eating",
+        "sleep_state": "awake",
+        "schedule_generated_date": "2026-06-01",
+        "activity_since": ts.isoformat(),
+        "last_transition_processed_at": ts.isoformat(),
+    }
+    await manager.restore(data)
+    snap = manager.snapshot()
+    assert snap.current_activity == ActivityType.WORKING
+    assert snap.prev_activity == ActivityType.EATING
+    assert snap.activity_since == ts
+    assert snap.last_transition_processed_at == ts
+
+
+@pytest.mark.asyncio
+async def test_restore_backward_compatible_without_timing(manager):
+    """Fix 3: restore should work even if timing fields are missing (old data)."""
+    data = {
+        "current_activity": "sleeping",
+        "prev_activity": "other",
+        "sleep_state": "sleeping",
+        "schedule_generated_date": "2026-06-01",
+    }
+    await manager.restore(data)
+    snap = manager.snapshot()
+    assert snap.current_activity == ActivityType.SLEEPING
+    # timing fields should keep their defaults
+    assert snap.activity_since is not None
+    assert snap.last_transition_processed_at is not None

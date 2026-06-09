@@ -146,6 +146,8 @@ class RelationSystem:
                     "proactive_score": new_score,
                     "last_impression_update": now.timestamp(),
                 }
+                if imp and imp.get("last_interaction"):
+                    new_imp["last_interaction"] = imp["last_interaction"]
                 await self._db.save_impression(new_imp)
 
             except Exception as e:

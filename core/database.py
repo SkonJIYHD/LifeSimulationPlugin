@@ -201,7 +201,9 @@ class Database:
     async def mark_dirty(self, person_id: str) -> None:
         async def op(c):
             await c.execute(
-                "UPDATE person_impression SET dirty = 1 WHERE person_id = ?",
+                "INSERT INTO person_impression (person_id, person_name, traits, dirty) "
+                "VALUES (?, '', '[]', 1) "
+                "ON CONFLICT(person_id) DO UPDATE SET dirty = 1",
                 (person_id,),
             )
 
@@ -282,6 +284,18 @@ class Database:
         await (await self.enqueue_write(op))
 
     # ── ProcessedTransition ────────────────────────────────────────────────
+
+    async def save_processed_transition(self, transition_id: str, ttl: int = 86400) -> None:
+        now = time.time()
+
+        async def op(c):
+            await c.execute(
+                "INSERT OR REPLACE INTO processed_transition "
+                "(transition_id, processed_at, expires_at) VALUES (?, ?, ?)",
+                (transition_id, now, now + ttl),
+            )
+
+        await (await self.enqueue_write(op))
 
     async def load_processed_transitions_unexpired(self) -> dict[str, float]:
         async with self._read_conn.execute(
