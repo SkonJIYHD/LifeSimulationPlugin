@@ -4,6 +4,12 @@
 # Business logic is delegated to components/ pure functions.
 from __future__ import annotations
 import os
+import sys
+
+# 确保插件根目录在 Python 路径中，以便宿主程序加载时能找到本地模块
+_plugin_dir = os.path.dirname(os.path.abspath(__file__))
+if _plugin_dir not in sys.path:
+    sys.path.insert(0, _plugin_dir)
 
 from maibot_sdk import MaiBotPlugin, HookHandler, Tool, API, Command, CONFIG_RELOAD_SCOPE_SELF
 from maibot_sdk.types import HookMode, HookOrder, ErrorPolicy, ToolParameterInfo, ToolParamType
